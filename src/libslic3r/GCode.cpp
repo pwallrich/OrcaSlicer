@@ -1213,6 +1213,11 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         // Process the custom change_filament_gcode. If it is empty, provide a simple Tn command to change the filament.
         // Otherwise, leave control to the user completely.
         std::string change_filament_gcode = gcodegen.config().change_filament_gcode.value;
+        // Orca: a swap between two filaments of one toolhead changes no tool; the writer's manual
+        // swap (pause G-code) replaces the change_filament_gcode macro.
+        if (gcodegen.writer().filament() != nullptr &&
+            gcodegen.is_manual_toolhead_swap(int(gcodegen.writer().filament()->id()), new_filament_id))
+            change_filament_gcode.clear();
 
         bool is_used_travel_avoid_perimeter = gcodegen.m_config.prime_tower_skip_points.value;
         if (is_nozzle_change && !tcr.nozzle_change_result.is_extruder_change) is_used_travel_avoid_perimeter = false;
@@ -1458,6 +1463,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                     config.set_key_value(key_value, new ConfigOptionFloat(0.f));
                 }
             }
+            gcodegen.remap_change_filament_placeholders(config, old_filament_id, new_filament_id);
             toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_filament_id, &config);
 
             check_add_eol(toolchange_gcode_str);
@@ -1488,9 +1494,14 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             // non-multi-nozzle paths (the helper falls back to the extruder id).
             toolchange_command = gcodegen.writer().toolchange(new_filament_id,
                 nozzle_id_for_gcode_placeholder(group_result, new_filament_id, new_extruder_id, m_layer_idx));
-        if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(), new_filament_id))
+        if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(), gcodegen.toolchange_tool_id(new_filament_id)))
             toolchange_gcode_str += toolchange_command;
-        else {
+        else if (gcodegen.writer().has_shared_toolheads() && new_filament_id >= 0) {
+            // The macro selected the toolhead; the viewer still needs to know which filament it holds,
+            // and a toolhead still holding another filament needs the manual reload after it.
+            toolchange_gcode_str += ";" + GCodeProcessor::Filament_Toolhead_Tag + std::to_string(new_filament_id) + "\n" +
+                                    (toolchange_command.empty() ? std::string() : gcodegen.writer().last_manual_load_gcode());
+        } else {
             // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
         }
 
@@ -1631,7 +1642,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         gcode += tcr_gcode;
         // Count the toolchange only when the emitted block really changed the tool —
         // tower visits without a filament change must not advance the ordinal.
-        if (custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(), new_filament_id))
+        if (custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(), gcodegen.toolchange_tool_id(new_filament_id)))
             gcodegen.m_toolchange_count++;
         check_add_eol(toolchange_gcode_str);
 
@@ -4397,7 +4408,49 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         file.write(m_writer.set_additional_fan(0));
     }
 
-    std::string machine_start_gcode = this->placeholder_parser_process("machine_start_gcode", print.config().machine_start_gcode.value, initial_extruder_id);
+    // Orca: on a toolchanger whose toolheads are shared by several filaments (Snapmaker U1 with a
+    // 5th colour), start G-code addresses toolheads: is_extruder_used[n], the temperature arrays
+    // and initial_tool name T<n>. Rebuild them per toolhead from the first filament each toolhead
+    // prints, so filament 5 on T0 heats T0 with its own temperature and no T4 is addressed.
+    DynamicConfig start_override;
+    if (m_writer.has_shared_toolheads()) {
+        const size_t            heads = print.config().nozzle_diameter.values.size();
+        const std::vector<int> &fmap  = print.config().filament_map.values;
+        auto head_of = [&](unsigned int f) { return toolchanger_toolhead_of_filament(fmap, heads, f); };
+
+        std::vector<int> head_filament(heads, -1); // first filament each toolhead prints
+        if (initial_extruder_id != (unsigned int)-1)
+            head_filament[head_of(initial_extruder_id)] = int(initial_extruder_id);
+        for (const LayerTools &lt : tool_ordering.layer_tools())
+            for (unsigned int f : lt.extruders)
+                if (head_filament[head_of(f)] < 0)
+                    head_filament[head_of(f)] = int(f);
+
+        std::vector<unsigned char> heads_used(std::max(size_t(MAXIMUM_EXTRUDER_NUMBER), heads), 0);
+        std::vector<int> first_layer_temps(heads), temps(heads);
+        for (size_t h = 0; h < heads; ++h) {
+            // An unused toolhead keeps its own filament's temperatures (it is not heated anyway).
+            const int f = head_filament[h] >= 0 ? head_filament[h] : int(h);
+            heads_used[h] = head_filament[h] >= 0;
+            const size_t idx     = get_filament_config_index(f);
+            first_layer_temps[h] = m_config.nozzle_temperature_initial_layer.get_at(idx);
+            temps[h]             = m_config.nozzle_temperature.get_at(idx);
+        }
+        start_override.set_key_value("is_extruder_used", new ConfigOptionBools(heads_used));
+        start_override.set_key_value("first_layer_temperature", new ConfigOptionInts(first_layer_temps));
+        start_override.set_key_value("nozzle_temperature_initial_layer", new ConfigOptionInts(first_layer_temps));
+        start_override.set_key_value("temperature", new ConfigOptionInts(temps));
+        start_override.set_key_value("nozzle_temperature", new ConfigOptionInts(temps));
+        if (initial_extruder_id != (unsigned int)-1) {
+            start_override.set_key_value("initial_tool", new ConfigOptionInt(head_of(initial_extruder_id)));
+            start_override.set_key_value("initial_extruder", new ConfigOptionInt(head_of(initial_extruder_id)));
+        }
+    }
+    // Manual swaps on a shared toolhead pause with the printer's own pause G-code.
+    m_writer.set_manual_swap_gcode(this->placeholder_parser_process("machine_pause_gcode", print.config().machine_pause_gcode.value, initial_extruder_id));
+
+    std::string machine_start_gcode = this->placeholder_parser_process("machine_start_gcode", print.config().machine_start_gcode.value, initial_extruder_id,
+                                                                       start_override.empty() ? nullptr : &start_override);
     if (print.config().gcode_flavor != gcfKlipper) {
         // Set bed temperature if the start G-code does not contain any bed temp control G-codes.
         this->_print_first_layer_bed_temperature(file, print, machine_start_gcode, initial_extruder_id, true);
@@ -5090,6 +5143,47 @@ size_t GCode::get_extruder_id(unsigned int filament_id) const
         return m_print->get_extruder_id(filament_id);
     }
     return 0;
+}
+
+unsigned int GCode::toolchange_tool_id(unsigned int filament_id) const
+{
+    return m_writer.has_shared_toolheads() ? (unsigned int)get_extruder_index(m_writer.config, filament_id) : filament_id;
+}
+
+bool GCode::is_manual_toolhead_swap(int old_filament_id, int new_filament_id) const
+{
+    return old_filament_id >= 0 && new_filament_id >= 0 && old_filament_id != new_filament_id && m_writer.has_shared_toolheads() &&
+           toolchange_tool_id(old_filament_id) == toolchange_tool_id(new_filament_id);
+}
+
+void GCode::remap_change_filament_placeholders(DynamicConfig &config, int old_filament_id, int new_filament_id)
+{
+    if (!m_writer.has_shared_toolheads() || new_filament_id < 0)
+        return;
+    const int new_head = int(toolchange_tool_id(new_filament_id));
+    const int old_head = old_filament_id >= 0 ? int(toolchange_tool_id(old_filament_id)) : -1;
+    config.set_key_value("previous_extruder", new ConfigOptionInt(old_head));
+    config.set_key_value("next_extruder", new ConfigOptionInt(new_head));
+    // Per-filament arrays read as array[next_extruder] / array[previous_extruder]: give each toolhead
+    // slot the values of the filament changed from / to. Values already overridden for this change
+    // (e.g. an interface temperature) are taken from `config`.
+    for (const char *key : { "temperature", "nozzle_temperature", "first_layer_temperature", "nozzle_temperature_initial_layer",
+                             "filament_type" }) {
+        const ConfigOption *src = config.option(key);
+        if (src == nullptr)
+            src = this->placeholder_parser().config().option(key);
+        auto *src_vec = dynamic_cast<const ConfigOptionVectorBase *>(src);
+        if (src_vec == nullptr || src_vec->size() == 0)
+            continue;
+        std::unique_ptr<ConfigOption> remapped(src->clone());
+        auto *dst = static_cast<ConfigOptionVectorBase *>(remapped.get());
+        dst->resize(std::max({ dst->size(), size_t(new_head) + 1, size_t(std::max(old_head, 0)) + 1 }));
+        if (old_head >= 0 && size_t(old_filament_id) < src_vec->size())
+            dst->set_at(src, size_t(old_head), size_t(old_filament_id));
+        if (size_t(new_filament_id) < src_vec->size())
+            dst->set_at(src, size_t(new_head), size_t(new_filament_id));
+        config.set_key_value(key, remapped.release());
+    }
 }
 
 size_t GCode::get_filament_config_index(int filament_id) const
@@ -11480,6 +11574,12 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
 
     // Process the custom change_filament_gcode.
     std::string change_filament_gcode = m_config.change_filament_gcode.value;
+    // Orca: a swap between two filaments of one toolhead changes no tool; the writer's manual swap
+    // (pause G-code) replaces the change_filament_gcode macro.
+    if (is_manual_toolhead_swap(old_filament_id, int(new_filament_id)))
+        change_filament_gcode.clear();
+    else
+        remap_change_filament_placeholders(dyn_config, old_filament_id, int(new_filament_id));
 
     // Move the lift gcode here which is in the change_filament_gcode originally
     change_filament_gcode = this->retract(false, false, LiftType::SpiralLift, true) + change_filament_gcode;
@@ -11526,10 +11626,14 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     // tool activation there). Mid-print T<n> emits normally; Print::validate blocks
     // multi-color setups where it wouldn't make sense.
     const bool suppress_imex_bare = imex_suppresses_bare_toolchange(m_imex_parallel_mode, m_toolchange_count);
-    if (!custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), new_filament_id)
+    if (!custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), toolchange_tool_id(new_filament_id))
         && !suppress_imex_bare)
         gcode += toolchange_command;
-    else {
+    else if (m_writer.has_shared_toolheads()) {
+        // The macro selected the toolhead; the viewer still needs to know which filament it holds,
+        // and a toolhead still holding another filament needs the manual reload after it.
+        gcode += ";" + GCodeProcessor::Filament_Toolhead_Tag + std::to_string(new_filament_id) + "\n" + m_writer.last_manual_load_gcode();
+    } else {
         // user provided his own toolchange gcode, no need to do anything
     }
 

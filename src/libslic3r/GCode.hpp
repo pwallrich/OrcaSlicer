@@ -330,6 +330,14 @@ public:
     // resolver keys filament-indexed arrays, the nozzle resolver keys (extruder x volume-type)
     // slot arrays. Both degenerate to filament_id / extruder index on single-volume printers.
     size_t get_filament_config_index(int filament_id) const;
+    // Orca: toolchanger whose toolheads are shared by several filaments (GCodeWriter::has_shared_toolheads).
+    // The tool number a change addresses: the toolhead there, the filament id otherwise.
+    unsigned int toolchange_tool_id(unsigned int filament_id) const;
+    // A change between two filaments of one toolhead: a manual swap, no change_filament_gcode.
+    bool is_manual_toolhead_swap(int old_filament_id, int new_filament_id) const;
+    // change_filament_gcode templates (e.g. Snapmaker U1) use [next_extruder] as the T<n> and as the
+    // index into per-filament arrays; on shared toolheads point both at the toolheads.
+    void remap_change_filament_placeholders(DynamicConfig &config, int old_filament_id, int new_filament_id);
     // The filament resolver for a given layer, for the export pipeline stages after the generator,
     // which run behind the current layer and concurrently with the generator.
     size_t get_filament_config_index(int filament_id, size_t layer_id) const;

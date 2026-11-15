@@ -2818,6 +2818,10 @@ static bool has_zero_flush_volume_for_used_filaments(const std::vector<T> &fv_ma
 }
 
 size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id);
+// Orca: toolhead (0-based) of a physical filament on a non-SEMM, non-BBL toolchanger. The first
+// `toolheads` filaments sit on their own toolhead; extra filaments are loaded by hand into the
+// toolhead their 1-based filament_map entry names, T0 when it names none.
+int toolchanger_toolhead_of_filament(const std::vector<int>& filament_map, size_t toolheads, unsigned int filament_id);
 
 double nozzle_diameter_for_filament(const PrintConfig& config, int filament_id, bool is_bbl_printer);
 

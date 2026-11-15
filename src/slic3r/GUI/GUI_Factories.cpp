@@ -1998,6 +1998,23 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     append_submenu(menu, sub_menu, wxID_ANY, _L("Merge with"), "", "",
         [filaments_cnt]() { return filaments_cnt > 1; }, m_parent);
 
+    // Orca: on a toolchanger an extra filament (past the toolhead count) is loaded into one of
+    // the toolheads by hand; let the user pick which.
+    if (Sidebar::is_fixed_toolchanger() && active_filament_menu_id >= int(Sidebar::toolhead_count())) {
+        wxMenu*      toolhead_menu = new wxMenu();
+        const size_t filament_idx  = size_t(active_filament_menu_id);
+        for (int head = 0; head < int(Sidebar::toolhead_count()); ++head) {
+            // T<n> is the G-code tool command and is not translated.
+            append_menu_check_item(toolhead_menu, wxID_ANY, wxString::Format("T%d", head), "",
+                [head, filament_idx](wxCommandEvent&) { plater()->sidebar().set_filament_toolhead(filament_idx, head); },
+                toolhead_menu, []() { return true; },
+                [head, filament_idx]() { return Sidebar::get_filament_toolhead(filament_idx) == head; }, m_parent);
+        }
+        append_submenu(menu, toolhead_menu, wxID_ANY, _L("Load into toolhead"),
+                       _L("The toolhead this filament is loaded into by hand. Printing it pauses for a manual filament swap."),
+                       "", []() { return true; }, m_parent);
+    }
+
     // Decompose a target colour into a printable mix of the loaded filaments. Placed before the
     append_menu_item(
         menu, wxID_ANY, _L("Decompose Color"), "", [](wxCommandEvent&) {
@@ -2010,10 +2027,12 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     append_menu_item(
         menu, wxID_ANY, _L("Delete"), _L("Delete this filament"), [](wxCommandEvent&) {
             plater()->sidebar().delete_filament(-2); }, "", nullptr,
-        []() {
+        [active_filament_menu_id]() {
             return plater()->sidebar().combos_filament().size() > 1
-                // Orca: only show delete filament option for SEMM machines unless is BBL
-                && Sidebar::should_show_SEMM_buttons();
+                // Orca: only show delete filament option for SEMM machines unless is BBL,
+                // and for the extra (hand-swapped) filaments of a toolchanger
+                && (Sidebar::should_show_SEMM_buttons()
+                    || (Sidebar::is_fixed_toolchanger() && active_filament_menu_id >= int(Sidebar::toolhead_count())));
         }, m_parent);
 }
 

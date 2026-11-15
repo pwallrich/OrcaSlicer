@@ -1557,7 +1557,17 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     {
         FilamentMapMode map_mode = new_full_config.option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode", true)->value;
         if (is_auto_filament_map_mode(map_mode)) {
-            if (print_diff_set.find("filament_map") != print_diff_set.end()) {
+            // Orca: on a non-BBL toolchanger the auto grouping honours the user's map for the
+            // filaments past the toolhead count (hand-swapped extras), so a change there re-slices.
+            bool extra_toolhead_changed = false;
+            if (!m_isBBLPrinter) {
+                const auto&  old_map = m_config.filament_map.values;
+                const auto&  new_map = new_full_config.option<ConfigOptionInts>("filament_map", true)->values;
+                const size_t heads   = new_full_config.option<ConfigOptionFloats>("nozzle_diameter", true)->size();
+                for (size_t i = heads; i < std::max(old_map.size(), new_map.size()) && !extra_toolhead_changed; ++i)
+                    extra_toolhead_changed = (i < old_map.size() ? old_map[i] : 1) != (i < new_map.size() ? new_map[i] : 1);
+            }
+            if (!extra_toolhead_changed && print_diff_set.find("filament_map") != print_diff_set.end()) {
                 print_diff_set.erase("filament_map");
                 full_config_diff.erase(std::remove(full_config_diff.begin(), full_config_diff.end(), "filament_map"), full_config_diff.end());
                 ConfigOptionInts* old_opt = m_full_print_config.option<ConfigOptionInts>("filament_map", true);

@@ -105,6 +105,7 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 void GCodeWriter::apply_print_config(const PrintConfig &print_config)
 {
     this->config.apply(print_config, true);
+    m_toolhead_count = print_config.nozzle_diameter.values.size();
 
     // Some machine limits are stride-2 (normal, silent) pairs, here we extract the value that will be used,
     // which is always normal mode at the moment
@@ -800,11 +801,57 @@ std::string GCodeWriter::toolchange_prefix() const
            FLAVOR_IS(gcfSailfish)  ? "M108 T" : "T";
 }
 
+bool GCodeWriter::has_shared_toolheads() const
+{
+    if (m_is_bbl_printers || config.single_extruder_multi_material || config.manual_filament_change || m_toolhead_count < 2)
+        return false;
+    return std::any_of(m_filament_extruders.begin(), m_filament_extruders.end(),
+                       [](const Extruder &e) { return e.extruder_id() != e.id(); });
+}
+
 std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
 {
+    // Orca: a toolchanger carrying more filaments than toolheads (e.g. Snapmaker U1 with a 5th
+    // colour) assigns each extra filament to a physical toolhead. Then the tool command selects
+    // the toolhead, a switch between two filaments of the same toolhead is a manual swap (M600),
+    // and a tag tells the G-code viewer which filament is now printing.
+    const bool      shared_toolheads = has_shared_toolheads();
+    const Extruder *prev_filament    = filament();
+
     // set the new extruder
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);
+    if (shared_toolheads) {
+        const unsigned int toolhead = filament_extruder_iter->extruder_id();
+        // The filament the target toolhead last printed is still loaded in it. A different one
+        // there needs a manual reload, also when the change selects another toolhead first.
+        const Extruder *loaded      = m_curr_filament_extruder[toolhead];
+        const bool      head_change = prev_filament == nullptr || prev_filament->extruder_id() != toolhead;
+        m_curr_extruder_id = toolhead;
+        m_curr_filament_extruder[m_curr_extruder_id] = &*filament_extruder_iter;
+        m_cached_extruder_idx = get_extruder_index(this->config, filament_id);
+
+        m_last_manual_load_gcode.clear();
+        if (loaded != nullptr && loaded->id() != filament_id) {
+            // The printer's own pause G-code (M601 on the Snapmaker U1); M600 only when it has none.
+            const std::string message = "Load filament " + std::to_string(filament_id + 1) + " into T" + std::to_string(toolhead);
+            m_last_manual_load_gcode = "M117 " + message + "\n";
+            // Klipper's M117 only sets the display status; RESPOND also echoes the message to the console.
+            if (FLAVOR_IS(gcfKlipper))
+                m_last_manual_load_gcode += "RESPOND MSG=\"" + message + "\"\n";
+            m_last_manual_load_gcode += m_manual_swap_gcode.empty() ? std::string("M600") : m_manual_swap_gcode;
+            if (m_last_manual_load_gcode.back() != '\n')
+                m_last_manual_load_gcode += "\n";
+        }
+
+        std::ostringstream gcode;
+        gcode << ";" << GCodeProcessor::Filament_Toolhead_Tag << filament_id << "\n";
+        if (head_change)
+            gcode << this->toolchange_prefix() << toolhead << (GCodeWriter::full_gcode_comment ? " ; change extruder" : "") << "\n";
+        gcode << m_last_manual_load_gcode;
+        gcode << this->reset_e(true);
+        return gcode.str();
+    }
     m_curr_extruder_id = filament_extruder_iter->extruder_id();
     m_curr_filament_extruder[m_curr_extruder_id] = &*filament_extruder_iter;
     m_cached_extruder_idx = get_extruder_index(this->config, filament_id);

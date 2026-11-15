@@ -145,6 +145,15 @@ size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id)
     return 0;
 }
 
+int toolchanger_toolhead_of_filament(const std::vector<int>& filament_map, size_t toolheads, unsigned int filament_id)
+{
+    if (filament_id < toolheads)
+        return int(filament_id);
+    if (filament_id < filament_map.size() && filament_map[filament_id] >= 1 && size_t(filament_map[filament_id]) <= toolheads)
+        return filament_map[filament_id] - 1;
+    return 0;
+}
+
 double nozzle_diameter_for_filament(const PrintConfig& config, int filament_id, bool is_bbl_printer)
 {
     int extruder = filament_id;

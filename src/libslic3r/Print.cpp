@@ -2192,6 +2192,63 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
     }
 
+    // Orca: a toolchanger with more filaments than toolheads loads each extra filament into a
+    // toolhead by hand (ToolOrdering::get_recommended_filament_maps). Two filaments of this plate
+    // on one toolhead mean a pause for a manual swap.
+    if (!m_isBBLPrinter && nozzles > 1 && !m_config.single_extruder_multi_material && !m_config.manual_filament_change) {
+        auto toolhead_of = [this, nozzles](unsigned int f) {
+            return toolchanger_toolhead_of_filament(m_config.filament_map.values, nozzles, f);
+        };
+
+        // A mixed filament alternates its components every layer (or sublayer). Two components on
+        // one toolhead would pause for a manual swap on every layer, so that is an error.
+        const auto &is_mixed  = m_config.filament_is_mixed.values;
+        const auto &comp_strs = m_config.filament_mixed_components.values;
+        for (unsigned int f : extruders) {
+            if (f >= is_mixed.size() || !is_mixed[f] || f >= comp_strs.size())
+                continue;
+            std::map<int, unsigned int> head_owner; // toolhead -> first 1-based component on it
+            for (unsigned int comp : parse_mixed_components(comp_strs[f])) {
+                if (comp == 0)
+                    continue; // deleted component
+                const int head = toolhead_of(comp - 1);
+                auto [it, inserted] = head_owner.emplace(head, comp);
+                if (inserted)
+                    continue;
+                StringObjectException err;
+                // TRN %1% is the mixed filament's number, %2% and %3% filament numbers, %4% a toolhead index (T0, T1, ...).
+                err.string = Slic3r::format(L("Mixed filament %1% blends filaments %2% and %3%, which share toolhead T%4%. "
+                                              "It would pause for a manual filament swap on every layer. "
+                                              "Load one of them into another toolhead."),
+                                            f + 1, it->second, comp, head);
+                return err;
+            }
+        }
+
+        // A mixed filament is virtual: it prints with its component filaments, so count those.
+        std::vector<unsigned int> physical = expand_mixed_filaments(extruders, is_mixed, comp_strs);
+        sort_remove_duplicates(physical);
+        std::map<int, std::vector<unsigned int>> by_toolhead;
+        for (unsigned int f : physical)
+            by_toolhead[toolhead_of(f)].push_back(f);
+        std::string shared;
+        for (const auto &[head, filaments] : by_toolhead) {
+            if (filaments.size() < 2)
+                continue;
+            std::string ids;
+            for (unsigned int f : filaments)
+                ids += (ids.empty() ? "" : ", ") + std::to_string(f + 1);
+            // TRN %1% is a toolhead index (T0, T1, ...), %2% a comma-separated list of filament numbers.
+            shared += "\n" + Slic3r::format(L("T%1%: filaments %2%"), head, ids);
+        }
+        if (!shared.empty())
+            // TRN %1% is the number of filaments the plate prints with, %2% the number of toolheads, %3% one
+            // "T<n>: filaments <list>" line per shared toolhead.
+            warn(Slic3r::format(L("Filaments used on this plate: %1%. Toolheads on the printer: %2%. Filaments on the same "
+                                  "toolhead are swapped by hand: the print pauses (M600) at every swap.%3%"),
+                                physical.size(), nozzles, shared));
+    }
+
     // IDEX/IQEX: block multi-color in non-primary parallel modes when the active
     // configuration can't physically support it (no within-gantry toolchange path
     // or MMU lane sharing). See imex_multicolor_block_reason() for the full rule.

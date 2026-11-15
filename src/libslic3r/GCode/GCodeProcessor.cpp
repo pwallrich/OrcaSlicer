@@ -192,6 +192,7 @@ const std::string GCodeProcessor::Machine_End_GCode_Start_Tag = " MACHINE_END_GC
 const std::string GCodeProcessor::Nozzle_Change_Start_Tag      = " NOZZLE_CHANGE_START";
 const std::string GCodeProcessor::Nozzle_Change_End_Tag        = " NOZZLE_CHANGE_END";
 const std::string GCodeProcessor::Toolchange_Wipe_Tag          = " CP_TOOLCHANGE_WIPE";
+const std::string GCodeProcessor::Filament_Toolhead_Tag        = " FILAMENT_TOOLHEAD ";
 
 const float GCodeProcessor::Wipe_Width = 0.05f;
 const float GCodeProcessor::Wipe_Height = 0.05f;
@@ -3737,6 +3738,7 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
 
 void GCodeProcessor::reset()
 {
+    m_filament_toolhead_tags = false;
     m_units = EUnits::Millimeters;
     m_global_positioning_type = EPositioningType::Absolute;
     m_e_local_positioning_type = EPositioningType::Absolute;
@@ -4608,6 +4610,13 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (boost::starts_with(comment, reserved_tag(ETags::Width))) {
             if (!parse_number(comment.substr(reserved_tag(ETags::Width).size()), m_forced_width))
                 BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
+            return;
+        }
+        // Orca: filament on a shared toolhead; from here on plain T<n> commands name toolheads
+        if (boost::starts_with(comment, Filament_Toolhead_Tag)) {
+            m_filament_toolhead_tags = true;
+            std::string cmd = "T" + std::string(comment.substr(Filament_Toolhead_Tag.length()));
+            process_T(std::string_view(cmd));
             return;
         }
         // Orca: manual tool change tag
@@ -7117,6 +7126,9 @@ void GCodeProcessor::process_T(const GCodeReader::GCodeLine& line)
     // parse the H<nozzle> logical-nozzle id off the T line. H2C's change_filament template emits
     // `T<fil> H<nozzle>`; the single-nozzle fleet emits a bare `T<fil>` (H absent → -1 → byte-inert
     // via the self-gate).
+    // Orca: the FILAMENT_TOOLHEAD tag already switched the filament; T<n> only picks its toolhead.
+    if (m_filament_toolhead_tags)
+        return;
     int   nozzle_id = -1;
     float nozzle_val = 0.f;
     if (line.has_value('H', nozzle_val))

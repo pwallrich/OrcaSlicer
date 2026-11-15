@@ -241,6 +241,15 @@ public:
     void get_small_btn_sync_pos_size(wxPoint &pt, wxSize &size);
     // Orca
     static bool should_show_SEMM_buttons();
+    // Orca: non-SEMM, non-BBL printer with several physical toolheads (e.g. Snapmaker U1). Such a
+    // printer may carry more filaments than toolheads; every extra filament is assigned to a
+    // toolhead and swapped by hand (or used on another plate).
+    static bool is_fixed_toolchanger();
+    static size_t toolhead_count();
+    // Toolhead (0-based) a filament is assigned to on a fixed toolchanger.
+    static int  get_filament_toolhead(size_t filament_idx);
+    void        set_filament_toolhead(size_t filament_idx, int toolhead);
+    void        update_filament_toolhead_tooltip(size_t filament_idx);
     void show_SEMM_buttons();
     void enable_purge_mode_btn(bool enable);
     // Sidebar nozzle-count badge on the extruder cards (multi-nozzle printers only).

@@ -619,6 +619,9 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         static const std::string Nozzle_Change_Start_Tag;
         static const std::string Nozzle_Change_End_Tag;
         static const std::string Toolchange_Wipe_Tag;
+        // Orca: "; FILAMENT_TOOLHEAD <filament>" precedes every tool change of a toolchanger whose
+        // toolheads are shared by several filaments; there T<n> names the toolhead, not the filament.
+        static const std::string Filament_Toolhead_Tag;
     public:
         enum class ETags : unsigned char
         {
@@ -1319,6 +1322,7 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         // pre-heat injector's second pass and gates the richer change-time model.
         std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
         bool m_manual_filament_change{ false };
+        bool m_filament_toolhead_tags{ false };
 
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };

@@ -3754,7 +3754,9 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filame
     edit_btn->Bind(wxEVT_BUTTON, [this, edit_btn, combobox, filament_idx](wxCommandEvent) {
         bool single_or_bbl     = should_show_SEMM_buttons();
         bool is_multi_material = p->combos_filament.size() > 1;
-        if(single_or_bbl && is_multi_material) {
+        // Orca: extra filaments on a toolchanger get the menu too (toolhead assignment, delete).
+        bool toolchanger_extra = is_fixed_toolchanger() && size_t(filament_idx) >= toolhead_count();
+        if((single_or_bbl && is_multi_material) || toolchanger_extra) {
            // MULTI MATERIAL Show menu
             auto menu = p->plater->filament_action_menu(filament_idx);
             wxPoint pt { 0, edit_btn->GetSize().GetHeight() + FromDIP(2) };
@@ -5883,6 +5885,9 @@ void Sidebar::delete_filament(size_t filament_id, int replace_filament_id) {
     if (filament_id == size_t(-1)) {
         filament_id = filament_count;
     }
+    // Orca: on a toolchanger the first N filaments are the toolheads' own; only extras can go.
+    if (is_fixed_toolchanger() && filament_id < toolhead_count())
+        return;
 
     // Mixed (virtual) slots have no combo of their own, so their config index lies past
     // filament_count; bound explicit ids by the total slot count instead.
@@ -6623,20 +6628,84 @@ bool Sidebar::should_show_SEMM_buttons()
     return cfg.opt_bool("single_extruder_multi_material") || is_bbl_vendor;
 }
 
+bool Sidebar::is_fixed_toolchanger()
+{
+    return !should_show_SEMM_buttons() && toolhead_count() > 1;
+}
+
+size_t Sidebar::toolhead_count()
+{
+    const auto &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto *nozzles = cfg.option<ConfigOptionFloats>("nozzle_diameter");
+    return nozzles ? nozzles->size() : 1;
+}
+
+int Sidebar::get_filament_toolhead(size_t filament_idx)
+{
+    // Must match ToolOrdering::get_recommended_filament_maps(): the first N filaments sit on their
+    // own toolhead, extra filaments use their filament_map entry (1-based), defaulting to T0.
+    const auto *map = wxGetApp().preset_bundle->project_config.option<ConfigOptionInts>("filament_map");
+    return toolchanger_toolhead_of_filament(map ? map->values : std::vector<int>(), toolhead_count(), (unsigned int)filament_idx);
+}
+
+void Sidebar::set_filament_toolhead(size_t filament_idx, int toolhead)
+{
+    if (filament_idx < toolhead_count() || toolhead < 0 || toolhead >= int(toolhead_count()))
+        return;
+    auto *map = wxGetApp().preset_bundle->project_config.option<ConfigOptionInts>("filament_map");
+    if (!map)
+        return;
+    const size_t filament_count = wxGetApp().preset_bundle->filament_presets.size();
+    if (map->values.size() <= filament_idx)
+        map->values.resize(std::max(filament_count, filament_idx + 1), 1);
+    map->values[filament_idx] = toolhead + 1;
+    // After a slice a plate keeps the engine's map in its own config, and slicing reads that plate
+    // map instead of the project's (PartPlate::get_real_filament_maps); carry the choice into it.
+    for (PartPlate *plate : p->plater->get_partplate_list().get_plate_list()) {
+        std::vector<int> plate_map = plate->get_filament_maps();
+        if (plate_map.empty())
+            continue;
+        if (plate_map.size() <= filament_idx)
+            plate_map.resize(std::max(filament_count, filament_idx + 1), 1);
+        plate_map[filament_idx] = toolhead + 1;
+        plate->set_filament_maps(plate_map);
+    }
+    if (filament_idx < p->combos_filament.size())
+        update_filament_toolhead_tooltip(filament_idx);
+    p->plater->update();
+}
+
+void Sidebar::update_filament_toolhead_tooltip(size_t filament_idx)
+{
+    if (filament_idx >= p->combos_filament.size())
+        return;
+    auto *combo = p->combos_filament[filament_idx];
+    if (!combo->edit_btn)
+        return;
+    if (is_fixed_toolchanger() && filament_idx >= toolhead_count())
+        combo->edit_btn->SetToolTip(wxString::Format(_L("Assigned to toolhead T%d (manual filament swap). Click to edit"),
+                                                     get_filament_toolhead(filament_idx)));
+    else
+        combo->edit_btn->SetToolTip(_L("Click to edit preset"));
+}
+
 void Sidebar::show_SEMM_buttons()
 {
     // ORCA
     if (!p || p->combos_filament.empty() || !p->m_bpButton_add_filament || !p->m_bpButton_del_filament || !p->m_flushing_volume_btn)
         return;
-    
+
     bool is_multi_material = p->combos_filament.size() > 1;
     bool single_or_bbl     = should_show_SEMM_buttons();
     bool is_single = single_or_bbl && !is_multi_material; // SINGLE EXTRUDER / BBL WITH 1 MATERIAL
     bool is_multi  = single_or_bbl && is_multi_material;  // MULTI MATERIAL WITH SINGLE EXTRUDER
     bool is_fixed  = !is_single && !is_multi;             // MULTI EXTRUDER / TOOLCHANGER / IDEX WITH FIXED MATERIAL
+    // Orca: a toolchanger may add filaments beyond its toolheads; only those extras can be deleted.
+    bool toolchanger = is_fixed_toolchanger();
+    bool has_extras  = toolchanger && p->combos_filament.size() > toolhead_count();
 
-    p->m_bpButton_add_filament->Show(single_or_bbl);
-    p->m_bpButton_del_filament->Show(is_multi);
+    p->m_bpButton_add_filament->Show(single_or_bbl || toolchanger);
+    p->m_bpButton_del_filament->Show(is_multi || has_extras);
     p->m_flushing_volume_btn->Show(  is_multi);
 
     if (is_multi) {
@@ -6644,9 +6713,11 @@ void Sidebar::show_SEMM_buttons()
             c->edit_btn->SetBitmap_("menu_filament");
     }
     else if (is_single || is_fixed) {
-        for (auto &c : p->combos_filament)
-            c->edit_btn->SetBitmap_("edit");
+        for (size_t i = 0; i < p->combos_filament.size(); ++i)
+            p->combos_filament[i]->edit_btn->SetBitmap_(toolchanger && i >= toolhead_count() ? "menu_filament" : "edit");
     }
+    for (size_t i = 0; i < p->combos_filament.size(); ++i)
+        update_filament_toolhead_tooltip(i);
 
     Layout();
 }

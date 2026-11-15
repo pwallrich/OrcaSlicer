@@ -2550,3 +2550,142 @@ TEST_CASE("A physical_extruder_map entry outside the nozzle range still exports"
         CHECK(gcode.find("; EXECUTABLE_BLOCK_END") != std::string::npos);
     }
 }
+
+// A toolchanger with more filaments than toolheads (Snapmaker U1 with a 5th colour): filament 3
+// is loaded by hand into T0 (filament_map), next to filament 1. Tool commands address toolheads,
+// a switch between two filaments of one toolhead pauses with the printer's pause G-code, and the
+// start G-code sees toolheads, not filament slots.
+static DynamicPrintConfig shared_toolhead_config()
+{
+    return multifilament_config(3, {
+        { "nozzle_diameter",                "0.4,0.4" },
+        { "printer_extruder_id",            "1,2" },
+        { "printer_extruder_variant",       "Direct Drive Standard,Direct Drive Standard" },
+        { "extruder_printable_height",      "0,0" },
+        { "filament_self_index",            "1,2,3" },
+        { "filament_map",                   "1,2,1" },
+        { "single_extruder_multi_material", 0 },
+        { "enable_prime_tower",             0 },
+        { "skirt_loops",                    0 },
+        { "brim_type",                      "no_brim" },
+        { "nozzle_temperature_initial_layer", "200,210,235" },
+        { "nozzle_temperature",             "200,210,235" },
+        { "machine_pause_gcode",            "M601" },
+        { "machine_start_gcode",            "START TOOL=[initial_tool] T0={is_extruder_used[0]} T1={is_extruder_used[1]} T2={is_extruder_used[2]} T0_TEMP={first_layer_temperature[0]}" },
+    });
+}
+
+static bool has_line(const std::string &gcode, const std::string &prefix)
+{
+    std::istringstream stream(gcode);
+    for (std::string line; std::getline(stream, line);)
+        if (line.rfind(prefix, 0) == 0)
+            return true;
+    return false;
+}
+
+TEST_CASE("A filament sharing a toolhead is swapped by hand with the pause G-code", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    size_flush_to_nozzles(config);
+    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                          { { { "extruder", 1 } }, { { "extruder", 3 } } });
+    CHECK(has_line(gcode, "M601"));
+    CHECK(has_line(gcode, "M117 Load filament 3 into T0"));
+    CHECK_FALSE(has_line(gcode, "RESPOND"));
+    CHECK_FALSE(has_line(gcode, "T2"));
+
+    config.set_deserialize_strict({ { "gcode_flavor", "klipper" } });
+    const std::string klipper_gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                                  { { { "extruder", 1 } }, { { "extruder", 3 } } });
+    CHECK(has_line(klipper_gcode, "RESPOND MSG=\"Load filament 3 into T0\""));
+}
+
+TEST_CASE("Start G-code addresses the toolhead an extra filament is loaded into", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    size_flush_to_nozzles(config);
+    const std::string gcode = slice_with_object_overrides({ cube(10) }, config, { { { "extruder", 3 } } });
+    CHECK(gcode.find("START TOOL=0 T0=true T1=false T2=false T0_TEMP=235") != std::string::npos);
+    CHECK_FALSE(has_line(gcode, "T2"));
+    CHECK_FALSE(has_line(gcode, "M601"));
+}
+
+// Snapmaker's own U1 change_filament_gcode selects the tool itself and indexes per-filament arrays
+// with [next_extruder]. With a shared toolhead it must see the toolhead there, and a swap within one
+// toolhead must skip the macro and pause instead.
+TEST_CASE("A change_filament_gcode macro addresses toolheads when filaments share one", "[MultiFilament][Toolchanger]")
+{
+    const bool prime_tower = GENERATE(false, true);
+    DYNAMIC_SECTION("prime tower " << prime_tower) {
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({
+            { "change_filament_gcode", "M109 S{temperature[next_extruder]} T{next_extruder}\nT{next_extruder}\nPREEXTRUDE INDEX={next_extruder}\n" },
+            { "enable_prime_tower", prime_tower ? 1 : 0 },
+            { "wipe_tower_x", "60" },
+            { "wipe_tower_y", "60" },
+        });
+        size_flush_to_nozzles(config);
+        // Filaments 1 and 3 share T0, filament 2 is on T1: every layer switches T0 <-> T1 and swaps 1 <-> 3 on T0.
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
+        CHECK_FALSE(has_line(gcode, "T2"));
+        CHECK_FALSE(has_line(gcode, "PREEXTRUDE INDEX=2"));
+        CHECK(has_line(gcode, "M109 S235 T0")); // filament 3's temperature on its toolhead
+        CHECK(has_line(gcode, "M601"));
+    }
+}
+
+// Filaments 1 and 3 (ids 0 and 2) share T0, filament 2 is on T1. Walking the G-code, every time a
+// toolhead is handed a filament other than the one it last printed - also right after switching
+// from the other toolhead - a pause must come before the next extrusion. Returns the number of
+// reloads that came with a toolhead change.
+static int check_every_reload_pauses(const std::string &gcode)
+{
+    int last_head = -1;
+    const std::string tag = ";" + GCodeProcessor::Filament_Toolhead_Tag;
+    std::map<int, int> loaded; // toolhead -> filament id
+    bool pause_due = false;
+    int  reloads   = 0;
+    std::istringstream stream(gcode);
+    for (std::string line; std::getline(stream, line);) {
+        if (line.rfind(tag, 0) == 0) {
+            const int filament = std::stoi(line.substr(tag.size()));
+            const int head     = filament == 1 ? 1 : 0;
+            if (loaded.count(head) && loaded[head] != filament) {
+                pause_due = true;
+                if (head != last_head)
+                    ++reloads;
+            }
+            loaded[head] = filament;
+            last_head    = head;
+        } else if (line.rfind("M601", 0) == 0) {
+            pause_due = false;
+        } else if (pause_due && line.rfind("G1 ", 0) == 0 && line.find(" E") != std::string::npos &&
+                   line.find_first_of("XY") != std::string::npos && line[line.find(" E") + 2] != '-') {
+            FAIL("extrusion before the manual reload pause: " << line);
+        }
+    }
+    return reloads;
+}
+
+TEST_CASE("A toolhead change that needs a reload pauses after selecting the toolhead", "[MultiFilament][Toolchanger]")
+{
+    const bool macro       = GENERATE(false, true);
+    const bool prime_tower = GENERATE(false, true);
+    DYNAMIC_SECTION("macro " << macro << ", prime tower " << prime_tower) {
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({
+            { "change_filament_gcode", macro ? "M109 S{temperature[next_extruder]} T{next_extruder}\nT{next_extruder}\n" : "" },
+            { "enable_prime_tower", prime_tower ? 1 : 0 },
+            { "wipe_tower_x", "60" },
+            { "wipe_tower_y", "60" },
+            { "gcode_comments", 1 },
+        });
+        size_flush_to_nozzles(config);
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
+        CHECK(check_every_reload_pauses(gcode) > 0); // the case under test does occur
+        CHECK_FALSE(has_line(gcode, "T2"));
+    }
+}
