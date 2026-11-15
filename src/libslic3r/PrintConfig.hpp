@@ -1893,6 +1893,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,      travel_speed))
     ((ConfigOptionFloatsNullable,      travel_speed_z))
     ((ConfigOptionString,              machine_pause_gcode))
+    ((ConfigOptionString,              manual_filament_swap_gcode))
     ((ConfigOptionString,              template_custom_gcode))
     //BBS
     ((ConfigOptionEnumsGenericNullable,nozzle_type))

@@ -2649,6 +2649,7 @@ namespace DoExport {
         if (ret.size() < MAX_TAGS_COUNT) check(_(L("Change extrusion role G-code")), config.change_extrusion_role_gcode.value);
         if (ret.size() < MAX_TAGS_COUNT) check(_(L("Process change extrusion role G-code")), config.process_change_extrusion_role_gcode.value);
         if (ret.size() < MAX_TAGS_COUNT) check(_(L("Pause G-code")), config.machine_pause_gcode.value);
+        if (ret.size() < MAX_TAGS_COUNT) check(_(L("Manual filament swap G-code")), config.manual_filament_swap_gcode.value);
         if (ret.size() < MAX_TAGS_COUNT) check(_(L("Template Custom G-code")), config.template_custom_gcode.value);
         if (ret.size() < MAX_TAGS_COUNT) {
             for (const std::string& value : config.filament_start_gcode.values) {
@@ -4446,8 +4447,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             start_override.set_key_value("initial_extruder", new ConfigOptionInt(head_of(initial_extruder_id)));
         }
     }
-    // Manual swaps on a shared toolhead pause with the printer's own pause G-code.
-    m_writer.set_manual_swap_gcode(this->placeholder_parser_process("machine_pause_gcode", print.config().machine_pause_gcode.value, initial_extruder_id));
+    // Manual swaps on a shared toolhead run the printer's manual filament swap G-code, or its
+    // pause G-code when that is empty (M600 when both are).
+    std::string pause_gcode = this->placeholder_parser_process("machine_pause_gcode", print.config().machine_pause_gcode.value, initial_extruder_id);
+    if (pause_gcode.empty())
+        pause_gcode = "M600";
+    m_writer.set_manual_swap_gcode([this, pause_gcode](unsigned int toolhead, unsigned int previous_filament, unsigned int next_filament) {
+        const std::string &swap_gcode = m_config.manual_filament_swap_gcode.value;
+        if (swap_gcode.empty())
+            return pause_gcode;
+        DynamicConfig config;
+        config.set_key_value("toolhead", new ConfigOptionInt(int(toolhead)));
+        config.set_key_value("previous_filament", new ConfigOptionInt(int(previous_filament)));
+        config.set_key_value("next_filament", new ConfigOptionInt(int(next_filament)));
+        return this->placeholder_parser_process("manual_filament_swap_gcode", swap_gcode, next_filament, &config);
+    });
 
     std::string machine_start_gcode = this->placeholder_parser_process("machine_start_gcode", print.config().machine_start_gcode.value, initial_extruder_id,
                                                                        start_override.empty() ? nullptr : &start_override);
@@ -8399,6 +8413,7 @@ void GCode::apply_print_config(const PrintConfig &print_config)
              &m_config.process_change_extrusion_role_gcode,
              &m_config.printing_by_object_gcode,
              &m_config.machine_pause_gcode,
+             &m_config.manual_filament_swap_gcode,
              &m_config.template_custom_gcode,
          }) {
         if (opt->empty())

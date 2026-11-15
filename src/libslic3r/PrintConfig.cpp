@@ -5552,6 +5552,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("manual_filament_swap_gcode", coString);
+    def->label = L("Manual filament swap G-code");
+    def->tooltip = L("On a toolchanger with more filaments than toolheads, this G-code runs when a filament is swapped by "
+                     "hand on a toolhead that another filament is loaded into. It must pause the print. When empty, the "
+                     "pause G-code is used.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 12;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString());
+
     def = this->add("template_custom_gcode", coString);
     def->label = L("Custom G-code");
     def->tooltip = L("This G-code will be used as a custom code.");
@@ -13865,6 +13876,7 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     {"process_change_extrusion_role_gcode", {"layer_num", "layer_z", "extrusion_role", "last_extrusion_role"}},
     {"printing_by_object_gcode",    {}},
     {"machine_pause_gcode",         {}},
+    {"manual_filament_swap_gcode",  {"toolhead", "previous_filament", "next_filament"}},
     {"template_custom_gcode",       {}},
     // Filament G-code
     {"filament_start_gcode",        {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id",
@@ -13937,6 +13949,11 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     new_def("timelapse_inline_photo", coBool, L("Timelapse inline photo"), L("Whether the photo is taken where the nozzle already is, without moving to a safe timelapse position first."));
     new_def("farthest_point_timelapse_enabled", coBool, L("Farthest-point timelapse enabled"), L("Whether farthest-point timelapse positioning is active."));
     new_def("clear_to_x0", coBool, L("Clear path to X0"), L("Whether the nozzle can move to X0 at the current height without hitting another printed object."));
+
+// manual_filament_swap_gcode
+    new_def("toolhead", coInt, L("Toolhead"), L("Index of the toolhead whose filament is swapped by hand. The index is zero-based (first toolhead has index 0)."));
+    new_def("previous_filament", coInt, L("Previous filament"), L("Index of the filament that is being unloaded. The index is zero-based (first filament has index 0)."));
+    new_def("next_filament", coInt, L("Next filament"), L("Index of the filament that is being loaded. The index is zero-based (first filament has index 0)."));
 
 // change_filament_gcode
     new_def("previous_extruder", coInt, L("Previous extruder"), L("Index of the filament that is being unloaded. The index is zero-based (first filament has index 0). At the start of the print, when no filament is loaded yet, it is -1."));
