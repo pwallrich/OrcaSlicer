@@ -833,12 +833,13 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
 
         m_last_manual_load_gcode.clear();
         if (loaded != nullptr && loaded->id() != filament_id) {
+            // The printer's own pause G-code (M601 on the Snapmaker U1); M600 only when it has none.
             const std::string message = "Load filament " + std::to_string(filament_id + 1) + " into T" + std::to_string(toolhead);
             m_last_manual_load_gcode = "M117 " + message + "\n";
             // Klipper's M117 only sets the display status; RESPOND also echoes the message to the console.
             if (FLAVOR_IS(gcfKlipper))
                 m_last_manual_load_gcode += "RESPOND MSG=\"" + message + "\"\n";
-            m_last_manual_load_gcode += m_manual_swap_gcode ? m_manual_swap_gcode(toolhead, loaded->id(), filament_id) : std::string("M600");
+            m_last_manual_load_gcode += m_manual_swap_gcode.empty() ? std::string("M600") : m_manual_swap_gcode;
             if (m_last_manual_load_gcode.back() != '\n')
                 m_last_manual_load_gcode += "\n";
         }

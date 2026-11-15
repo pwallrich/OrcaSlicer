@@ -161,10 +161,8 @@ public:
     // Orca: true when some filament is assigned to another filament's toolhead (more filaments than
     // toolheads on a non-SEMM toolchanger); tool changes then address toolheads, not filaments.
     bool has_shared_toolheads() const;
-    // Builds the G-code for a manual swap between two filaments of one toolhead:
-    // (toolhead, previous filament, next filament), all zero-based. M600 when unset.
-    using ManualSwapGcodeFn = std::function<std::string(unsigned int, unsigned int, unsigned int)>;
-    void set_manual_swap_gcode(ManualSwapGcodeFn fn) { m_manual_swap_gcode = std::move(fn); }
+    // Processed pause G-code emitted for a manual swap between two filaments of one toolhead.
+    void set_manual_swap_gcode(std::string gcode) { m_manual_swap_gcode = std::move(gcode); }
     // The manual reload (message + pause) the last toolchange() emitted, empty when none. A
     // change_filament_gcode macro that selects the toolhead itself still needs it appended.
     const std::string& last_manual_load_gcode() const { return m_last_manual_load_gcode; }
@@ -311,7 +309,7 @@ private:
     bool            m_is_bbl_printers = false;
     // Physical toolheads (PrintConfig::nozzle_diameter size); GCodeConfig does not carry it.
     size_t          m_toolhead_count  = 1;
-    ManualSwapGcodeFn m_manual_swap_gcode;
+    std::string     m_manual_swap_gcode;
     std::string     m_last_manual_load_gcode;
 
     enum class Acceleration {

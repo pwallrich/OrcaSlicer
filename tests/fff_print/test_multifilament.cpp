@@ -2601,17 +2601,6 @@ TEST_CASE("A filament sharing a toolhead is swapped by hand with the pause G-cod
     CHECK(has_line(klipper_gcode, "RESPOND MSG=\"Load filament 3 into T0\""));
 }
 
-TEST_CASE("Manual filament swap G-code knows the toolhead and both filaments", "[MultiFilament][Toolchanger]")
-{
-    DynamicPrintConfig config = shared_toolhead_config();
-    config.set_deserialize_strict({ { "manual_filament_swap_gcode", "UNLOAD T={toolhead} FROM={previous_filament} TO={next_filament}\nM601" } });
-    size_flush_to_nozzles(config);
-    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
-                                                          { { { "extruder", 1 } }, { { "extruder", 3 } } });
-    CHECK(has_line(gcode, "UNLOAD T=0 FROM=0 TO=2"));
-    CHECK(has_line(gcode, "M601"));
-}
-
 TEST_CASE("Start G-code addresses the toolhead an extra filament is loaded into", "[MultiFilament][Toolchanger]")
 {
     DynamicPrintConfig config = shared_toolhead_config();

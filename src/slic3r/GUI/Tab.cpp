@@ -5826,16 +5826,6 @@ void TabPrinter::build_fff()
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option, "printer_machine_gcode#pause-g-code");
 
-        optgroup = page->new_optgroup(L("Manual filament swap G-code"), L"param_gcode", 0);
-        optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
-            validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
-        };
-        optgroup->edit_custom_gcode = edit_custom_gcode_fn;
-        option = optgroup->get_option("manual_filament_swap_gcode");
-        option.opt.is_code = true;
-        option.opt.height = gcode_field_height;
-        optgroup->append_single_option_line(option);
-
         optgroup = page->new_optgroup(L("Template Custom G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
