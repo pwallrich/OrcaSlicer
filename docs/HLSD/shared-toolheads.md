@@ -86,6 +86,11 @@ uses the tag only for ids within its filament count. A saved file's config block
 describes toolheads, so opening it again falls back to the `T` commands and
 attributes every extrusion to its toolhead.
 
+With `single_extruder_multi_material_priming`, the wipe tower primes only the
+filament each toolhead prints first, the one the printer is told it holds.
+Priming the others would pause for manual swaps before the print starts; each is
+purged on the tower when it is loaded during the print.
+
 `Print::validate` warns when a plate uses two filaments on one toolhead, because
 the print will pause. A mixed filament whose components share a toolhead is an
 error, since it would pause on every layer.

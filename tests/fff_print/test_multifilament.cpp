@@ -2856,3 +2856,27 @@ TEST_CASE("A change_filament_gcode macro sees the toolhead the print started on"
     CHECK(has_line(gcode, "INITIAL=0 TOOL=0 NEXT="));
     CHECK_FALSE(has_line(gcode, "INITIAL=2"));
 }
+
+// Priming every filament would pause for manual swaps before the print starts: each toolhead primes
+// only the filament it prints first, and the others are purged on the tower when loaded.
+TEST_CASE("Priming loads each shared toolhead once", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    config.set_deserialize_strict({
+        { "enable_prime_tower", 1 },
+        { "single_extruder_multi_material_priming", 1 },
+        { "wipe_tower_x", "60" },
+        { "wipe_tower_y", "60" },
+    });
+    size_flush_to_nozzles(config);
+    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10), cube(10) }, config,
+                                                          { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
+    const size_t first_layer = gcode.find(";LAYER_CHANGE");
+    REQUIRE(first_layer != std::string::npos);
+    const std::string before_print = gcode.substr(0, first_layer);
+    CHECK(before_print.find("CP PRIMING") != std::string::npos); // priming does run
+    CHECK(before_print.find("M117 Load") == std::string::npos);
+    CHECK(before_print.find("M601") == std::string::npos);
+    CHECK(check_every_reload_pauses(gcode) >= 0); // swaps during the print still pause
+    CHECK(has_line(gcode, "M601"));
+}

@@ -5786,13 +5786,39 @@ void Print::_make_wipe_tower()
         for (size_t i = 0; i < number_of_extruders; ++i)
             wipe_tower.set_extruder(i, m_config);
 
+        // Orca: on shared toolheads (same gate as GCodeWriter::has_shared_toolheads) prime only the
+        // filament each toolhead prints first, which it is loaded with at the start. Priming the others
+        // would pause for a manual swap before the print starts; each is purged on the tower when it
+        // is loaded during the print.
+        std::vector<unsigned int> primed = m_wipe_tower_data.tool_ordering.all_extruders();
+        const size_t              toolheads = m_config.nozzle_diameter.size();
+        if (!m_isBBLPrinter && toolheads > 1 && !m_config.single_extruder_multi_material && !m_config.manual_filament_change &&
+            !m_config.is_imex.value) {
+            const auto &mixed       = m_config.filament_is_mixed.values;
+            auto        is_mixed    = [&mixed](unsigned int f) { return f < mixed.size() && mixed[f]; };
+            auto        toolhead_of = [this, toolheads](unsigned int f) {
+                return toolchanger_toolhead_of_filament(m_config.filament_map.values, toolheads, f);
+            };
+            if (std::any_of(primed.begin(), primed.end(), [&](unsigned int f) { return !is_mixed(f) && toolhead_of(f) != int(f); })) {
+                std::map<int, unsigned int> first_on_head;
+                for (const LayerTools &lt : m_wipe_tower_data.tool_ordering.layer_tools())
+                    for (unsigned int f : lt.extruders)
+                        if (!is_mixed(f))
+                            first_on_head.emplace(toolhead_of(f), f);
+                primed.erase(std::remove_if(primed.begin(), primed.end(), [&](unsigned int f) {
+                                 return !is_mixed(f) && first_on_head[toolhead_of(f)] != f;
+                             }), primed.end());
+            }
+        }
         m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
-            wipe_tower.prime((float)this->skirt_first_layer_height(), m_wipe_tower_data.tool_ordering.all_extruders(), false));
+            wipe_tower.prime((float)this->skirt_first_layer_height(), primed, false));
 
         // Lets go through the wipe tower layers and determine pairs of extruder changes for each
         // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
         {
-            unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.all_extruders().back();
+            // The export starts on the last primed filament, or on the last one when it skips priming.
+            unsigned int current_extruder_id = m_config.single_extruder_multi_material_priming ? primed.back() :
+                                                   m_wipe_tower_data.tool_ordering.all_extruders().back();
             for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
                 if (!layer_tools.has_wipe_tower)
                     continue;

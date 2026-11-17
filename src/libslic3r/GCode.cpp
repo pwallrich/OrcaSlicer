@@ -11752,8 +11752,8 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
         // user provided his own toolchange gcode, no need to do anything
     }
     // Orca: a filament loaded by hand prints at its own temperature. The next object printed by
-    // object starts on its first layer.
-    gcode += manual_load_reheat(new_filament_id, by_object ? 0 : new_filament_temp);
+    // object starts on its first layer, and so does priming, which runs before any layer is set.
+    gcode += manual_load_reheat(new_filament_id, by_object || m_layer == nullptr ? 0 : new_filament_temp);
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)
     if (m_config.single_extruder_multi_material && !m_config.enable_prime_tower) {
