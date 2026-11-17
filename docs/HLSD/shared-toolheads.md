@@ -21,9 +21,11 @@ map with that rule, so a filament below the toolhead count always reports its
 own toolhead. The choice is written to the project map and to every plate's
 map, because a plate's map overrides the project's once it has been sliced.
 
-Sharing exists only when there are more filaments than toolheads, and
-`GCodeWriter::has_shared_toolheads` is true only then, on a non-BBL, non-SEMM
-printer without `manual_filament_change`. Every behaviour below is gated by it,
+Sharing exists only when a filament is actually mapped to another filament's
+toolhead. `GCodeWriter::has_shared_toolheads` is true only then, on a non-BBL,
+non-SEMM, non-IMEX printer without `manual_filament_change` and with at least
+two toolheads. Mixed filaments are not counted, since they print through their
+components. The sidebar offers the assignment under the same conditions. Every behaviour below is gated by it,
 so a printer whose filaments each have their own toolhead produces the same
 G-code as before.
 
@@ -36,11 +38,16 @@ from the loaded one it emits a message and the printer's pause G-code:
 
 ```
 ; FILAMENT_TOOLHEAD 4
-M117 Switch from filament 1 to filament 5
-RESPOND MSG="Switch from filament 1 to filament 5"   ; Klipper only
+M117 Load filament 5 (PETG #FF0000) into the active toolhead
+RESPOND MSG="Load filament 5 (PETG #FF0000) into the active toolhead"   ; Klipper only
 M600                                    ; machine_pause_gcode, M600 if empty
 M117                                    ; clears the message once the print resumes
+M109 S235 T0                            ; the new filament's temperature on its toolhead
 ```
+
+`RESPOND` needs a `[respond]` section in the Klipper config; without it Klipper
+logs an unknown command and carries on, and the message still shows on the
+display.
 
 The swap pauses whether the toolhead also changes or not. `change_filament_gcode`
 is skipped for a swap on the same toolhead. For a real head change its
@@ -49,11 +56,20 @@ the toolhead slots of the temperature and `filament_type` arrays. Templates
 written for one filament per toolhead, such as the U1's, keep working. The start
 G-code sees `is_extruder_used`, the temperature arrays and `initial_tool` per
 toolhead too. `GCode::m_toolhead_filaments` records the filament each toolhead
-prints first, and those values come from it.
+prints first, and those values come from it. When printing by object it covers
+the filaments of every object, not only the first.
+
+Temperature commands name the toolhead as well. `GCodeWriter::set_temperature`
+maps a filament to its toolhead, the first-layer and second-layer temperature
+passes skip filaments their toolhead does not hold at that point, and the ooze
+prevention preheat is skipped for a swap on the same toolhead.
 
 The `FILAMENT_TOOLHEAD` tag carries the filament id for `GCodeProcessor`, which
-then ignores the `T` that follows. The preview keeps one colour per filament
-even though the file only names toolheads.
+selects that filament and ignores the `T` that follows. The preview keeps one
+colour per filament even though the file only names toolheads. The processor
+uses the tag only for ids within its filament count. A saved file's config block
+describes toolheads, so opening it again falls back to the `T` commands and
+attributes every extrusion to its toolhead.
 
 `Print::validate` warns when a plate uses two filaments on one toolhead, because
 the print will pause. A mixed filament whose components share a toolhead is an
@@ -63,7 +79,8 @@ error, since it would pause on every layer.
 
 The file addresses `T0` to `T<toolheads-1>` only, so the lists a printer reads
 from the file describe toolheads, not filaments. In the config block, every list
-with one entry per filament is collapsed to one entry per toolhead. Each entry
+with one entry per filament (a `filament_` key or a filament preset option) is
+collapsed to one entry per toolhead. Each entry
 holds the values of the filament that toolhead prints first, or of its own
 filament when it is unused. `filament_map` becomes the identity, and
 `flush_volumes_matrix` is reduced the same way. `GCodeProcessor` sums the
@@ -84,8 +101,14 @@ The U1 firmware keeps a table from logical tools to physical heads
 (`extruder_map_table`, set at print start and by auto-replenish). `T<n>`,
 `M104`/`M109 T<n>` and `SM_PRINT_PREEXTRUDE_FILAMENT` all go through it. Moving a
 whole toolhead to another physical head at print start therefore works: every
-filament on it moves along, and the swap pauses stay correct. The swap message
-names only the two filaments for that reason, not a toolhead.
+filament on it moves along, the swap pauses stay correct, and the temperature
+commands reach the head the filament is in. The swap message
+names no toolhead for that reason. The swap always happens on the toolhead the
+file has just selected, which the printer has already mapped, so "the active
+toolhead" is correct after any remapping. `M117` and `RESPOND` print their text
+as written; the printer translates tool numbers only in commands that act on a
+toolhead. The message gives the filament's number and `filament_colour`, and its
+`filament_type` when the print uses more than one type.
 
 A single filament cannot be moved to another head on the printer. The pauses are
 fixed at slice time from the grouping in `filament_map`, and a filament on a

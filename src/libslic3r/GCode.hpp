@@ -344,6 +344,9 @@ public:
     // The filament describing toolhead h in the printer-facing lists: its first, or its own when unused.
     static int toolhead_filament(const std::vector<int> &toolhead_filaments, size_t h)
     { return toolhead_filaments[h] >= 0 ? toolhead_filaments[h] : int(h); }
+    // Whether a filament is the one its toolhead holds now (or prints first). Per-toolhead
+    // temperature loops skip the others, which would overwrite their toolhead's heater.
+    bool holds_toolhead(unsigned int filament_id) const;
     // The filament resolver for a given layer, for the export pipeline stages after the generator,
     // which run behind the current layer and concurrently with the generator.
     size_t get_filament_config_index(int filament_id, size_t layer_id) const;

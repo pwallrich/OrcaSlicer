@@ -2571,6 +2571,8 @@ static DynamicPrintConfig shared_toolhead_config()
         { "nozzle_temperature_initial_layer", "200,210,235" },
         { "nozzle_temperature",             "200,210,235" },
         { "machine_pause_gcode",            "M601" },
+        { "filament_colour",                "#FF0000;#00FF00;#0000ffcc" },
+        { "filament_type",                  "PLA;PLA;PETG" },
         { "machine_start_gcode",            "START TOOL=[initial_tool] T0={is_extruder_used[0]} T1={is_extruder_used[1]} T2={is_extruder_used[2]} T0_TEMP={first_layer_temperature[0]}" },
     });
 }
@@ -2591,7 +2593,7 @@ TEST_CASE("A filament sharing a toolhead is swapped by hand with the pause G-cod
     const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
                                                           { { { "extruder", 1 } }, { { "extruder", 3 } } });
     CHECK(has_line(gcode, "M601"));
-    CHECK(has_line(gcode, "M117 Switch from filament 1 to filament 3"));
+    CHECK(has_line(gcode, "M117 Load filament 3 (PETG #0000FF) into the active toolhead"));
     CHECK(gcode.find("\nM601\nM117\n") != std::string::npos);
     CHECK_FALSE(has_line(gcode, "RESPOND"));
     CHECK_FALSE(has_line(gcode, "T2"));
@@ -2599,7 +2601,13 @@ TEST_CASE("A filament sharing a toolhead is swapped by hand with the pause G-cod
     config.set_deserialize_strict({ { "gcode_flavor", "klipper" } });
     const std::string klipper_gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
                                                                   { { { "extruder", 1 } }, { { "extruder", 3 } } });
-    CHECK(has_line(klipper_gcode, "RESPOND MSG=\"Switch from filament 1 to filament 3\""));
+    CHECK(has_line(klipper_gcode, "RESPOND MSG=\"Load filament 3 (PETG #0000FF) into the active toolhead\""));
+
+    // With one type in use, only the colour tells the spools apart.
+    config.set_deserialize_strict({ { "filament_type", "PLA;PLA;PLA" } });
+    const std::string single_type_gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                                      { { { "extruder", 1 } }, { { "extruder", 3 } } });
+    CHECK(has_line(single_type_gcode, "M117 Load filament 3 (#0000FF) into the active toolhead"));
 }
 
 TEST_CASE("The printer-facing filament lists describe toolheads", "[MultiFilament][Toolchanger]")
@@ -2712,4 +2720,62 @@ TEST_CASE("A toolhead change that needs a reload pauses after selecting the tool
         CHECK(check_every_reload_pauses(gcode) > 0); // the case under test does occur
         CHECK_FALSE(has_line(gcode, "T2"));
     }
+}
+
+TEST_CASE("Temperature commands address the toolhead a shared filament is loaded into", "[MultiFilament][Toolchanger]")
+{
+    const bool prime_tower = GENERATE(false, true);
+    DYNAMIC_SECTION("prime tower " << prime_tower) {
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({
+            { "enable_prime_tower", prime_tower ? 1 : 0 },
+            { "wipe_tower_x", "60" },
+            { "wipe_tower_y", "60" },
+        });
+        size_flush_to_nozzles(config);
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 3 } } });
+        std::istringstream stream(gcode);
+        bool after_swap = false, reheated = false;
+        for (std::string line; std::getline(stream, line);) {
+            if (line.rfind("M601", 0) == 0)
+                after_swap = true;
+            if (line.rfind("M104", 0) != 0 && line.rfind("M109", 0) != 0)
+                continue;
+            CHECK(line.find(" T2") == std::string::npos);
+            // Filament 3's temperature reaches T0 once the print resumes after a swap.
+            reheated |= after_swap && line.rfind("M109 S235 T0", 0) == 0;
+        }
+        CHECK(reheated);
+    }
+}
+
+TEST_CASE("Printing by object reports every toolhead the objects use", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    config.set_deserialize_strict({ { "print_sequence", "by object" } });
+    size_flush_to_nozzles(config);
+    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10), cube(10) }, config,
+                                                          { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
+    CHECK(gcode.find("T0=true T1=true T2=false") != std::string::npos);
+}
+
+TEST_CASE("Re-importing shared-toolhead G-code keeps extrusion on the toolheads", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    size_flush_to_nozzles(config);
+    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                          { { { "extruder", 1 } }, { { "extruder", 3 } } });
+    ScopedTemporaryFile temp(".gcode");
+    {
+        std::ofstream os(temp.string());
+        os << gcode;
+    }
+    GCodeProcessor proc;
+    proc.apply_config(FullPrintConfig{});
+    proc.process_file(temp.string());
+    const auto &volumes = proc.get_result().print_statistics.total_volumes_per_extruder;
+    REQUIRE_FALSE(volumes.empty());
+    for (const auto &[id, volume] : volumes)
+        CHECK(id < 2); // the file's config block describes two toolheads
 }

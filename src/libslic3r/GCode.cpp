@@ -32,6 +32,7 @@
 #include "I18N.hpp"
 #include "IMEXHelpers.hpp"
 #include "GCode.hpp"
+#include "Preset.hpp"
 #include <cstdio>
 #include "Exception.hpp"
 #include "LifecycleEvents.hpp"
@@ -3611,6 +3612,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     print.m_statistics_by_extruder_count.clear();
     std::vector<int>                                    first_filaments;
     std::vector<int>                                    first_non_support_filaments;
+    // Filaments in print order over all objects, for sequential printing (shared toolheads).
+    std::vector<unsigned int>                           sequential_filaments;
     std::vector<const PrintInstance*> 					print_object_instances_ordering;
     std::vector<const PrintInstance*>::const_iterator 	print_object_instance_sequential_active;
     std::vector<const PrintInstance *>::const_iterator  first_has_extrude_print_object;
@@ -3640,6 +3643,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
                 tool_ordering.sort_and_build_data(*(*print_object_instance_sequential_active)->print_object,initial_extruder_id);
             }
+            for (const LayerTools &lt : tool_ordering.layer_tools())
+                sequential_filaments.insert(sequential_filaments.end(), lt.extruders.begin(), lt.extruders.end());
             float temp_max_additional_fan = tool_ordering.cal_max_additional_fan(print.config());
             if(temp_max_additional_fan > max_additional_fan )
                         max_additional_fan = temp_max_additional_fan;
@@ -4265,15 +4270,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     m_toolhead_filaments.clear();
     if (m_writer.has_shared_toolheads()) {
         const size_t            heads = print.config().nozzle_diameter.values.size();
-        const std::vector<int> &fmap  = print.config().filament_map.values;
-        auto head_of = [&](unsigned int f) { return toolchanger_toolhead_of_filament(fmap, heads, f); };
+        auto head_of = [this](unsigned int f) { return m_writer.toolhead_of(f); };
         m_toolhead_filaments.assign(heads, -1);
+        auto note = [&](unsigned int f) {
+            const std::vector<unsigned char> &mixed = m_config.filament_is_mixed.values;
+            if (!(f < mixed.size() && mixed[f]) && m_toolhead_filaments[head_of(f)] < 0)
+                m_toolhead_filaments[head_of(f)] = int(f);
+        };
         if (initial_extruder_id != (unsigned int)-1)
-            m_toolhead_filaments[head_of(initial_extruder_id)] = int(initial_extruder_id);
-        for (const LayerTools &lt : tool_ordering.layer_tools())
-            for (unsigned int f : lt.extruders)
-                if (m_toolhead_filaments[head_of(f)] < 0)
-                    m_toolhead_filaments[head_of(f)] = int(f);
+            note(initial_extruder_id);
+        // Sequential printing: tool_ordering holds the last object only.
+        if (!sequential_filaments.empty())
+            std::for_each(sequential_filaments.begin(), sequential_filaments.end(), note);
+        else
+            for (const LayerTools &lt : tool_ordering.layer_tools())
+                std::for_each(lt.extruders.begin(), lt.extruders.end(), note);
     }
 
     // Orca: Don't output Header block if BTT thumbnail is identified in the list
@@ -4503,6 +4514,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     //BBS: gcode writer doesn't know where the real position of extruder is after inserting custom gcode
     m_writer.set_current_position_clear(false);
     m_start_gcode_filament = GCodeProcessor::get_gcode_last_filament(machine_start_gcode);
+    // On shared toolheads the start G-code's T<n> selects a toolhead: it then holds its first filament.
+    if (!m_toolhead_filaments.empty() && m_start_gcode_filament >= 0 && m_start_gcode_filament < int(m_toolhead_filaments.size()))
+        m_start_gcode_filament = toolhead_filament(m_toolhead_filaments, size_t(m_start_gcode_filament));
 
     if (is_bbl_printers) {
         m_writer.init_extruder(initial_non_support_extruder_id);
@@ -5162,7 +5176,16 @@ size_t GCode::get_extruder_id(unsigned int filament_id) const
 
 unsigned int GCode::toolchange_tool_id(unsigned int filament_id) const
 {
-    return m_writer.has_shared_toolheads() ? (unsigned int)get_extruder_index(m_writer.config, filament_id) : filament_id;
+    return m_writer.has_shared_toolheads() ? m_writer.toolhead_of(filament_id) : filament_id;
+}
+
+bool GCode::holds_toolhead(unsigned int filament_id) const
+{
+    if (m_toolhead_filaments.empty())
+        return true;
+    const unsigned int head   = m_writer.toolhead_of(filament_id);
+    const Extruder    *loaded = m_writer.filament(head);
+    return int(filament_id) == (loaded != nullptr ? int(loaded->id()) : toolhead_filament(m_toolhead_filaments, head));
 }
 
 bool GCode::is_manual_toolhead_swap(int old_filament_id, int new_filament_id) const
@@ -5741,6 +5764,8 @@ void GCode::_print_first_layer_extruder_temperatures(GCodeOutputStream &file, Pr
         } else {
             // Set temperatures of all the printing extruders.
             for (unsigned int tool_id : print.extruders()) {
+                if (!holds_toolhead(tool_id))
+                    continue;
                 int temp = print.config().nozzle_temperature_initial_layer.get_at(get_filament_config_index((int)tool_id));
                 if (m_ooze_prevention.enable && tool_id != first_printing_extruder_id) {
                     if (print.config().idle_temperature.get_at(tool_id) == 0)
@@ -7090,6 +7115,8 @@ LayerResult GCode::process_layer(
                 if ((print.config().single_extruder_multi_material.value || m_ooze_prevention.enable) &&
                     extruder.id() != m_writer.filament()->id())
                     // In single extruder multi material mode, set the temperature for the current extruder only.
+                    continue;
+                if (!holds_toolhead(extruder.id()))
                     continue;
                 size_t fi = get_filament_config_index((int)extruder.id());
                 int temperature = print.config().nozzle_temperature.get_at(fi);
@@ -8468,12 +8495,14 @@ void GCode::append_full_config(const Print &print, std::string &str, const std::
         // Orca: shared toolheads. The file addresses T0..T<heads-1> only, and a printer reads its per-tool
         // lists from here (the Snapmaker U1 asks which spool each listed tool uses). Describe one entry
         // per toolhead by the filament it prints first. Sharing implies more filaments than toolheads,
-        // so only per-filament lists have the filament count.
+        // so no per-toolhead list has the filament count; the key check keeps out other lists
+        // (per plate, per object) that happen to.
         const size_t filaments = cfg.option<ConfigOptionStrings>("filament_colour")->values.size();
         const size_t heads     = toolhead_filaments.size();
+        const std::set<std::string> filament_keys(Preset::filament_options().begin(), Preset::filament_options().end());
         for (const std::string &key : cfg.keys()) {
             auto *opt = dynamic_cast<ConfigOptionVectorBase *>(cfg.optptr(key));
-            if (opt == nullptr || opt->size() != filaments)
+            if (opt == nullptr || opt->size() != filaments || !(boost::starts_with(key, "filament_") || filament_keys.count(key)))
                 continue;
             std::unique_ptr<ConfigOption> per_filament(opt->clone());
             opt->resize(heads);
@@ -11384,7 +11413,8 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
             && pem[a] == pem[b];
     };
     if (m_ooze_prevention.enable && m_writer.filament() != nullptr
-        && !same_physical_extruder(m_writer.filament()->id(), (int)new_filament_id))
+        && !same_physical_extruder(m_writer.filament()->id(), (int)new_filament_id)
+        && !is_manual_toolhead_swap(m_writer.filament()->id(), (int)new_filament_id))
         gcode += m_ooze_prevention.pre_toolchange(*this);
 
     // BBS
@@ -11675,6 +11705,14 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
         gcode += ";" + GCodeProcessor::Filament_Toolhead_Tag + std::to_string(new_filament_id) + "\n" + m_writer.last_manual_load_gcode();
     } else {
         // user provided his own toolchange gcode, no need to do anything
+    }
+    // Orca: a filament loaded by hand into a shared toolhead prints at its own temperature. Wait for it
+    // once the print resumes; the toolhead was still holding the previous filament's temperature.
+    if (!m_writer.last_manual_load_gcode().empty()) {
+        const size_t fi = get_filament_config_index(new_filament_id);
+        gcode += m_writer.set_temperature(m_layer_index <= 0 ? m_config.nozzle_temperature_initial_layer.get_at(fi) :
+                                                               m_config.nozzle_temperature.get_at(fi),
+                                          true, int(new_filament_id));
     }
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)

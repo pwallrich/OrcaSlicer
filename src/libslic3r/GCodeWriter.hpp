@@ -161,6 +161,9 @@ public:
     // Orca: true when some filament is assigned to another filament's toolhead (more filaments than
     // toolheads on a non-SEMM toolchanger); tool changes then address toolheads, not filaments.
     bool has_shared_toolheads() const;
+    // The toolhead a filament is loaded into (toolchanger_toolhead_of_filament).
+    unsigned int toolhead_of(unsigned int filament_id) const
+    { return (unsigned int)toolchanger_toolhead_of_filament(config.filament_map.values, m_toolhead_count, filament_id); }
     // Processed pause G-code emitted for a manual swap between two filaments of one toolhead.
     void set_manual_swap_gcode(std::string gcode) { m_manual_swap_gcode = std::move(gcode); }
     // The manual reload (message + pause) the last toolchange() emitted, empty when none. A

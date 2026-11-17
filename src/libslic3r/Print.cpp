@@ -2195,7 +2195,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     // Orca: a toolchanger with more filaments than toolheads loads each extra filament into a
     // toolhead by hand (ToolOrdering::get_recommended_filament_maps). Two filaments of this plate
     // on one toolhead mean a pause for a manual swap.
-    if (!m_isBBLPrinter && nozzles > 1 && !m_config.single_extruder_multi_material && !m_config.manual_filament_change) {
+    // Same gate as GCodeWriter::has_shared_toolheads.
+    if (!m_isBBLPrinter && nozzles > 1 && !m_config.single_extruder_multi_material && !m_config.manual_filament_change &&
+        !m_config.is_imex.value) {
         auto toolhead_of = [this, nozzles](unsigned int f) {
             return toolchanger_toolhead_of_filament(m_config.filament_map.values, nozzles, f);
         };
@@ -2245,7 +2247,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             // TRN %1% is the number of filaments the plate prints with, %2% the number of toolheads, %3% one
             // "T<n>: filaments <list>" line per shared toolhead.
             warn(Slic3r::format(L("Filaments used on this plate: %1%. Toolheads on the printer: %2%. Filaments on the same "
-                                  "toolhead are swapped by hand: the print pauses (M600) at every swap.%3%"),
+                                  "toolhead are swapped by hand: the print pauses with the printer's pause G-code at every swap.%3%"),
                                 physical.size(), nozzles, shared));
     }
 

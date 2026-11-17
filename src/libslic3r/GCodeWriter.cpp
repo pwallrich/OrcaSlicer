@@ -19,6 +19,7 @@
 #include <array>
 #include <cstdint>
 #include <charconv>
+#include <boost/algorithm/string/case_conv.hpp>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -369,6 +370,9 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, in
         // GCode/GCodeProcessor.cpp:1410) and must not be remapped, which is why the
         // translation lives here and not there.
         tool = imex_physical_heater_for(this->config.is_imex.value, this->config.physical_extruder_map, tool);
+        // Orca: on shared toolheads the heater is the filament's toolhead, as for T<n>.
+        if (tool >= 0 && has_shared_toolheads())
+            tool = int(toolhead_of(unsigned(tool)));
     }
     return set_temperature(temperature, this->config.gcode_flavor, wait, tool);
 }
@@ -803,10 +807,15 @@ std::string GCodeWriter::toolchange_prefix() const
 
 bool GCodeWriter::has_shared_toolheads() const
 {
-    if (m_is_bbl_printers || config.single_extruder_multi_material || config.manual_filament_change || m_toolhead_count < 2)
+    // Print::validate and Sidebar::is_fixed_toolchanger use the same gate.
+    if (m_is_bbl_printers || config.single_extruder_multi_material || config.manual_filament_change || config.is_imex.value ||
+        m_toolhead_count < 2)
         return false;
-    return std::any_of(m_filament_extruders.begin(), m_filament_extruders.end(),
-                       [](const Extruder &e) { return e.extruder_id() != e.id(); });
+    // Mixed filaments are virtual slots realized by physical ones; they never select a toolhead.
+    return std::any_of(m_filament_extruders.begin(), m_filament_extruders.end(), [this](const Extruder &e) {
+        const std::vector<unsigned char> &mixed = config.filament_is_mixed.values;
+        return !(e.id() < mixed.size() && mixed[e.id()]) && toolhead_of(e.id()) != e.id();
+    });
 }
 
 std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
@@ -822,11 +831,11 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);
     if (shared_toolheads) {
-        const unsigned int toolhead = filament_extruder_iter->extruder_id();
+        const unsigned int toolhead = toolhead_of(filament_id);
         // The filament the target toolhead last printed is still loaded in it. A different one
         // there needs a manual reload, also when the change selects another toolhead first.
         const Extruder *loaded      = m_curr_filament_extruder[toolhead];
-        const bool      head_change = prev_filament == nullptr || prev_filament->extruder_id() != toolhead;
+        const bool      head_change = prev_filament == nullptr || toolhead_of(prev_filament->id()) != toolhead;
         m_curr_extruder_id = toolhead;
         m_curr_filament_extruder[m_curr_extruder_id] = &*filament_extruder_iter;
         m_cached_extruder_idx = get_extruder_index(this->config, filament_id);
@@ -834,8 +843,22 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
         m_last_manual_load_gcode.clear();
         if (loaded != nullptr && loaded->id() != filament_id) {
             // The printer's own pause G-code (M601 on the Snapmaker U1); M600 only when it has none.
-            // Filaments only: the printer may map the toolhead to another physical head.
-            const std::string message = "Switch from filament " + std::to_string(loaded->id() + 1) + " to filament " + std::to_string(filament_id + 1);
+            // The printer may map the toolhead to another physical head, so the message names no toolhead:
+            // the swap always happens on the toolhead just selected, which the printer has mapped.
+            std::string colour = filament_id < config.filament_colour.values.size() ? config.filament_colour.values[filament_id] : std::string();
+            if (colour.size() > 7 && colour.front() == '#')
+                colour.resize(7); // drop an alpha channel
+            boost::algorithm::to_upper(colour);
+            // The type only tells the spools apart when the print uses more than one.
+            const auto type_of = [this](unsigned int id) {
+                return id < config.filament_type.values.size() ? config.filament_type.values[id] : std::string();
+            };
+            const bool mixed_types = std::any_of(m_filament_extruders.begin(), m_filament_extruders.end(),
+                                                 [&](const Extruder &e) { return type_of(e.id()) != type_of(filament_id); });
+            const std::string type = mixed_types ? type_of(filament_id) : std::string();
+            const std::string details = type + (type.empty() || colour.empty() ? "" : " ") + colour;
+            const std::string message = "Load filament " + std::to_string(filament_id + 1) + (details.empty() ? "" : " (" + details + ")") +
+                                        " into the active toolhead";
             m_last_manual_load_gcode = "M117 " + message + "\n";
             // Klipper's M117 only sets the display status; RESPOND also echoes the message to the console.
             if (FLAVOR_IS(gcfKlipper))

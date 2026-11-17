@@ -4627,10 +4627,15 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
             return;
         }
         // Orca: filament on a shared toolhead; from here on plain T<n> commands name toolheads
+        // A file whose config block lists toolheads (re-imported G-code) has no entry for an extra
+        // filament: then the tags are dropped and T<n> picks the toolhead's colour.
         if (boost::starts_with(comment, Filament_Toolhead_Tag)) {
-            m_filament_toolhead_tags = true;
-            std::string cmd = "T" + std::string(comment.substr(Filament_Toolhead_Tag.length()));
-            process_T(std::string_view(cmd));
+            const std::string id = std::string(comment.substr(Filament_Toolhead_Tag.length()));
+            unsigned int      filament_id = 0;
+            std::from_chars(id.data(), id.data() + id.size(), filament_id);
+            m_filament_toolhead_tags = filament_id < m_result.filaments_count;
+            if (m_filament_toolhead_tags)
+                process_T(std::string_view("T" + id));
             return;
         }
         // Orca: manual tool change tag

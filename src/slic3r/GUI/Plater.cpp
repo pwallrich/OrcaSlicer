@@ -6630,7 +6630,11 @@ bool Sidebar::should_show_SEMM_buttons()
 
 bool Sidebar::is_fixed_toolchanger()
 {
-    return !should_show_SEMM_buttons() && toolhead_count() > 1;
+    // Same gate as GCodeWriter::has_shared_toolheads: no manual filament change, no IDEX/IQEX.
+    const auto &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto *manual = cfg.option<ConfigOptionBool>("manual_filament_change");
+    const auto *imex   = cfg.option<ConfigOptionBool>("is_imex");
+    return !should_show_SEMM_buttons() && toolhead_count() > 1 && !(manual && manual->value) && !(imex && imex->value);
 }
 
 size_t Sidebar::toolhead_count()
