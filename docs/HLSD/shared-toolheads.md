@@ -19,7 +19,13 @@ Only the filaments after them can be assigned, through "Load into toolhead" in
 the filament's menu in the sidebar. `toolchanger_toolhead_of_filament` reads the
 map with that rule, so a filament below the toolhead count always reports its
 own toolhead. The choice is written to the project map and to every plate's
-map, because a plate's map overrides the project's once it has been sliced.
+map, because a plate's map overrides the project's once it has been sliced, and
+marks the project as modified.
+
+Selecting a printer with several toolheads sizes the filament list to its
+toolhead count only upwards: switching to it from a printer with more filaments,
+or loading a project that has more, keeps the extra filaments, which then share
+toolheads. A printer with one toolhead still trims the list.
 
 Sharing exists only when a filament is actually mapped to another filament's
 toolhead. `GCodeWriter::has_shared_toolheads` is true only then, on a non-BBL,

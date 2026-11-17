@@ -6676,6 +6676,8 @@ void Sidebar::set_filament_toolhead(size_t filament_idx, int toolhead)
     }
     if (filament_idx < p->combos_filament.size())
         update_filament_toolhead_tooltip(filament_idx);
+    // The map is saved with the project, not with a preset: closing without saving must ask.
+    p->plater->set_plater_dirty(true);
     p->plater->update();
 }
 

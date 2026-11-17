@@ -2578,8 +2578,11 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         // sidebar's own +/- calls: they insert ahead of the mixed tail and renumber filament ids,
         // painted facets, custom g-code and mixed components, which a bulk resize clamps away.
         // Both also refresh the print tab and export the selections, so nothing to do afterwards.
+        // Orca: a toolchanger loads extra filaments into its toolheads by hand
+        // (GCodeWriter::has_shared_toolheads), so it keeps them: only grow the list to one per toolhead.
+        const bool keep_extra = num_extruder > 1 && Sidebar::is_fixed_toolchanger();
         size_t physical = bundle->num_physical_filaments();
-        while (physical != num_extruder) {
+        while (physical != num_extruder && !(keep_extra && physical > num_extruder)) {
             if (physical < num_extruder)
                 sidebar.add_custom_filament(Plater::get_next_color_for_filament());
             else
