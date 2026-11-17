@@ -2818,6 +2818,22 @@ TEST_CASE("A hand swap waits for the loaded filament's printing temperature", "[
                                                               { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
         CHECK(waits_after_swap(gcode, "M109 S235 T0"));
     }
+    SECTION("tower interface temperature equal to the base temperature") {
+        // The tower strips M109s back to the base temperature to hold its interface temperature;
+        // the swap's own wait is the only temperature the loaded filament gets.
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({
+            { "enable_prime_tower", 1 },
+            { "enable_tower_interface_features", 1 },
+            { "filament_tower_interface_print_temp", "200,210,235" },
+            { "wipe_tower_x", "60" },
+            { "wipe_tower_y", "60" },
+        });
+        size_flush_to_nozzles(config);
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
+        CHECK(waits_after_swap(gcode, "M109 S235 T0"));
+    }
     SECTION("next object printed by object") {
         DynamicPrintConfig config = shared_toolhead_config();
         config.set_deserialize_strict({ { "print_sequence", "by object" }, { "nozzle_temperature_initial_layer", "200,210,245" } });

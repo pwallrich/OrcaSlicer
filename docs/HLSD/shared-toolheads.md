@@ -53,7 +53,8 @@ display.
 
 The `M109` after the pause waits for the temperature the new filament prints at
 there: its first layer temperature on the first layer, also of the next object
-when printing by object, and when its other-layers temperature is 0.
+when printing by object, when its other-layers temperature is 0, and the tower
+interface temperature on a contact toolchange.
 `GCode::manual_load_reheat` adds it on both the `set_extruder` and the type1
 wipe tower paths.
 
@@ -75,7 +76,8 @@ maps a filament to its toolhead, the first-layer and second-layer temperature
 passes skip filaments their toolhead does not hold at that point, and the ooze
 prevention preheat is skipped for a swap on the same toolhead. Ooze prevention
 turns a toolhead off only after the last use of every filament on it, and the
-tower interface temperature pass looks for the toolhead in the `M109` it strips.
+tower interface temperature pass looks for the toolhead in the `M109` it strips
+and leaves the swap's own `M109` alone.
 
 The `FILAMENT_TOOLHEAD` tag carries the filament id for `GCodeProcessor`, which
 selects that filament and ignores the `T` that follows. The preview keeps one

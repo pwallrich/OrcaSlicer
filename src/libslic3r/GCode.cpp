@@ -156,6 +156,10 @@ namespace fs = boost::filesystem;
 
 namespace Slic3r {
 
+// Orca: comment of the M109 that waits for a filament loaded by hand into a shared toolhead.
+// The tower interface temperature pass keeps it: it is the only temperature the swap gets.
+static const std::string MANUAL_LOAD_TEMPERATURE_COMMENT = "wait for the loaded filament's temperature";
+
 namespace {
 
 // Follow XY commands in a generated G-code block. This deliberately handles
@@ -1513,9 +1517,16 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         // Orca: a filament loaded by hand prints at its own temperature (the writer's manual load
         // state belongs to this change only when it made one).
         if (!toolchange_command.empty() && new_filament_id >= 0) {
-            const size_t fi = gcodegen.get_filament_config_index(new_filament_id);
-            toolchange_gcode_str += gcodegen.manual_load_reheat(new_filament_id,
-                gcodegen.on_first_layer() || tcr.priming ? 0 : gcodegen.config().nozzle_temperature.get_at(fi));
+            const FullPrintConfig &cfg  = gcodegen.config();
+            const size_t           fi   = gcodegen.get_filament_config_index(new_filament_id);
+            int                    temp = gcodegen.on_first_layer() || tcr.priming ? 0 : cfg.nozzle_temperature.get_at(fi);
+            // A contact toolchange prints the tower at the interface temperature, as the macro is told.
+            if (cfg.enable_tower_interface_features && tcr.is_contact) {
+                temp = cfg.filament_tower_interface_print_temp.get_at(new_filament_id);
+                if (temp == -1)
+                    temp = cfg.nozzle_temperature_range_high.get_at(fi);
+            }
+            toolchange_gcode_str += gcodegen.manual_load_reheat(new_filament_id, temp);
         }
 
         // The change G-code may move the carriage even when the incoming
@@ -1873,7 +1884,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                 std::string trimmed = line;
                 trimmed.erase(0, trimmed.find_first_not_of(" \t"));
                 bool skip_line = false;
-                if (boost::starts_with(trimmed, "M109")) {
+                if (boost::starts_with(trimmed, "M109") && trimmed.find(MANUAL_LOAD_TEMPERATURE_COMMENT) == std::string::npos) {
                     bool matches_extruder = trimmed.find(t_token) != std::string::npos;
                     if (!matches_extruder) {
                         size_t t_pos = trimmed.find('T');
@@ -5211,7 +5222,8 @@ std::string GCode::manual_load_reheat(unsigned int filament_id, int temperature)
         return {};
     if (temperature <= 0) // nozzle_temperature == 0 means "use the first layer temperature"
         temperature = m_config.nozzle_temperature_initial_layer.get_at(get_filament_config_index(int(filament_id)));
-    return m_writer.set_temperature(unsigned(temperature), true, int(filament_id));
+    return GCodeWriter::set_temperature(unsigned(temperature), m_writer.config.gcode_flavor, true,
+                                        int(m_writer.toolhead_of(filament_id)), MANUAL_LOAD_TEMPERATURE_COMMENT);
 }
 
 bool GCode::is_manual_toolhead_swap(int old_filament_id, int new_filament_id) const
