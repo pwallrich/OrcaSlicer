@@ -1203,6 +1203,20 @@ void GCodeProcessor::run_post_process()
         filament_total_cost += filament_cost[id];
     }
 
+    if (m_filament_toolhead_tags) {
+        // Orca: shared toolheads (FILAMENT_TOOLHEAD tags). The file addresses toolheads and its config
+        // block lists them, so the stats list toolheads too: each one's sum over its filaments.
+        const size_t     heads = m_nozzle_diameter.size();
+        std::vector<int> filament_map(m_filament_maps.size());
+        std::transform(m_filament_maps.begin(), m_filament_maps.end(), filament_map.begin(), [](int head) { return head + 1; });
+        for (std::vector<double> *values : { &filament_mm, &filament_cm3, &filament_g, &filament_cost }) {
+            std::vector<double> per_head(heads, 0.0);
+            for (size_t f = 0; f < values->size(); ++f)
+                per_head[toolchanger_toolhead_of_filament(filament_map, heads, (unsigned int)f)] += (*values)[f];
+            *values = std::move(per_head);
+        }
+    }
+
     double total_g_wipe_tower = m_print->print_statistics().total_wipe_tower_filament;
 
 

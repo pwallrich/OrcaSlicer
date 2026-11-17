@@ -2591,14 +2591,38 @@ TEST_CASE("A filament sharing a toolhead is swapped by hand with the pause G-cod
     const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
                                                           { { { "extruder", 1 } }, { { "extruder", 3 } } });
     CHECK(has_line(gcode, "M601"));
-    CHECK(has_line(gcode, "M117 Load filament 3 into T0"));
+    CHECK(has_line(gcode, "M117 Switch from filament 1 to filament 3"));
+    CHECK(gcode.find("\nM601\nM117\n") != std::string::npos);
     CHECK_FALSE(has_line(gcode, "RESPOND"));
     CHECK_FALSE(has_line(gcode, "T2"));
 
     config.set_deserialize_strict({ { "gcode_flavor", "klipper" } });
     const std::string klipper_gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
                                                                   { { { "extruder", 1 } }, { { "extruder", 3 } } });
-    CHECK(has_line(klipper_gcode, "RESPOND MSG=\"Load filament 3 into T0\""));
+    CHECK(has_line(klipper_gcode, "RESPOND MSG=\"Switch from filament 1 to filament 3\""));
+}
+
+TEST_CASE("The printer-facing filament lists describe toolheads", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    size_flush_to_nozzles(config);
+    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                          { { { "extruder", 1 } }, { { "extruder", 3 } } });
+    auto value_of = [&gcode](const std::string &key) {
+        std::istringstream stream(gcode);
+        std::string line;
+        while (std::getline(stream, line))
+            if (line.rfind(key, 0) == 0)
+                return line.substr(key.size());
+        return std::string();
+    };
+    // Filaments 1 and 3 share T0, which prints filament 1 first; T1 (filament 2) is unused.
+    CHECK(value_of("; nozzle_temperature = ") == "200,210");
+    CHECK(value_of("; filament_map = ") == "1,2");
+    CHECK(value_of("; filament: ") == "1");
+    const std::string used = value_of("; filament used [mm] = ");
+    CHECK(std::count(used.begin(), used.end(), ',') == 1);
+    CHECK(used.substr(used.find(", ")) == ", 0.00");
 }
 
 TEST_CASE("Start G-code addresses the toolhead an extra filament is loaded into", "[MultiFilament][Toolchanger]")

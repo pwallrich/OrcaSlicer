@@ -4260,6 +4260,22 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     if (!print.config().file_start_gcode.value.empty())
         file.writeln(this->placeholder_parser_process("file_start_gcode", print.config().file_start_gcode.value, initial_extruder_id));
 
+    // Orca: on shared toolheads the file addresses toolheads only; remember the filament each one
+    // prints first, which the start G-code, the config block and the filament stats describe it by.
+    m_toolhead_filaments.clear();
+    if (m_writer.has_shared_toolheads()) {
+        const size_t            heads = print.config().nozzle_diameter.values.size();
+        const std::vector<int> &fmap  = print.config().filament_map.values;
+        auto head_of = [&](unsigned int f) { return toolchanger_toolhead_of_filament(fmap, heads, f); };
+        m_toolhead_filaments.assign(heads, -1);
+        if (initial_extruder_id != (unsigned int)-1)
+            m_toolhead_filaments[head_of(initial_extruder_id)] = int(initial_extruder_id);
+        for (const LayerTools &lt : tool_ordering.layer_tools())
+            for (unsigned int f : lt.extruders)
+                if (m_toolhead_filaments[head_of(f)] < 0)
+                    m_toolhead_filaments[head_of(f)] = int(f);
+    }
+
     // Orca: Don't output Header block if BTT thumbnail is identified in the list
     // Get the thumbnails value as a string
     std::string thumbnails_value = print.config().option<ConfigOptionString>("thumbnails")->value;
@@ -4317,6 +4333,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
     {
         auto used_filaments = print.get_slice_used_filaments(false);
+        if (!m_toolhead_filaments.empty()) {
+            // Shared toolheads: list the toolheads in use, as the config block does.
+            used_filaments.clear();
+            for (size_t h = 0; h < m_toolhead_filaments.size(); ++h)
+                if (m_toolhead_filaments[h] >= 0)
+                    used_filaments.push_back((unsigned int)h);
+        }
         std::ostringstream out;
         out << "; filament: ";
         for (size_t idx = 0; idx < used_filaments.size(); ++idx) {
@@ -4340,7 +4363,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         if (is_bbl_printers && !skip_config_block) {
             file.write("; CONFIG_BLOCK_START\n");
             std::string full_config;
-            append_full_config(print, full_config);
+            append_full_config(print, full_config, m_toolhead_filaments);
             if (!full_config.empty())
                 file.write(full_config);
 
@@ -4413,25 +4436,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     // and initial_tool name T<n>. Rebuild them per toolhead from the first filament each toolhead
     // prints, so filament 5 on T0 heats T0 with its own temperature and no T4 is addressed.
     DynamicConfig start_override;
-    if (m_writer.has_shared_toolheads()) {
-        const size_t            heads = print.config().nozzle_diameter.values.size();
-        const std::vector<int> &fmap  = print.config().filament_map.values;
-        auto head_of = [&](unsigned int f) { return toolchanger_toolhead_of_filament(fmap, heads, f); };
-
-        std::vector<int> head_filament(heads, -1); // first filament each toolhead prints
-        if (initial_extruder_id != (unsigned int)-1)
-            head_filament[head_of(initial_extruder_id)] = int(initial_extruder_id);
-        for (const LayerTools &lt : tool_ordering.layer_tools())
-            for (unsigned int f : lt.extruders)
-                if (head_filament[head_of(f)] < 0)
-                    head_filament[head_of(f)] = int(f);
-
+    if (!m_toolhead_filaments.empty()) {
+        const size_t heads = m_toolhead_filaments.size();
+        auto head_of = [&](unsigned int f) {
+            return toolchanger_toolhead_of_filament(print.config().filament_map.values, heads, f);
+        };
         std::vector<unsigned char> heads_used(std::max(size_t(MAXIMUM_EXTRUDER_NUMBER), heads), 0);
         std::vector<int> first_layer_temps(heads), temps(heads);
         for (size_t h = 0; h < heads; ++h) {
             // An unused toolhead keeps its own filament's temperatures (it is not heated anyway).
-            const int f = head_filament[h] >= 0 ? head_filament[h] : int(h);
-            heads_used[h] = head_filament[h] >= 0;
+            const int f = toolhead_filament(m_toolhead_filaments, h);
+            heads_used[h] = m_toolhead_filaments[h] >= 0;
             const size_t idx     = get_filament_config_index(f);
             first_layer_temps[h] = m_config.nozzle_temperature_initial_layer.get_at(idx);
             temps[h]             = m_config.nozzle_temperature.get_at(idx);
@@ -4991,7 +5006,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     if (!is_bbl_printers && !skip_config_block) {
         file.write("; CONFIG_BLOCK_START\n");
         std::string full_config;
-        append_full_config(print, full_config);
+        append_full_config(print, full_config, m_toolhead_filaments);
         if (!full_config.empty())
           file.write(full_config);
 
@@ -8416,7 +8431,7 @@ void GCode::apply_print_config(const PrintConfig &print_config)
 #endif
 }
 
-void GCode::append_full_config(const Print &print, std::string &str)
+void GCode::append_full_config(const Print &print, std::string &str, const std::vector<int> &toolhead_filaments)
 {
     DynamicPrintConfig cfg = print.full_print_config();
     { // correct the flush_volumes_matrix with flush_multiplier values
@@ -8449,6 +8464,31 @@ void GCode::append_full_config(const Print &print, std::string &str)
     // built from still carries the registered default. Copy the real values so the header line is
     // diagnostic (nothing parses it back).
     cfg.option<ConfigOptionInts>("filament_map_2", true)->values = print.config().filament_map_2.values;
+    if (!toolhead_filaments.empty()) {
+        // Orca: shared toolheads. The file addresses T0..T<heads-1> only, and a printer reads its per-tool
+        // lists from here (the Snapmaker U1 asks which spool each listed tool uses). Describe one entry
+        // per toolhead by the filament it prints first. Sharing implies more filaments than toolheads,
+        // so only per-filament lists have the filament count.
+        const size_t filaments = cfg.option<ConfigOptionStrings>("filament_colour")->values.size();
+        const size_t heads     = toolhead_filaments.size();
+        for (const std::string &key : cfg.keys()) {
+            auto *opt = dynamic_cast<ConfigOptionVectorBase *>(cfg.optptr(key));
+            if (opt == nullptr || opt->size() != filaments)
+                continue;
+            std::unique_ptr<ConfigOption> per_filament(opt->clone());
+            opt->resize(heads);
+            for (size_t h = 0; h < heads; ++h)
+                opt->set_at(per_filament.get(), h, toolhead_filament(toolhead_filaments, h));
+        }
+        std::vector<double> &matrix = cfg.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
+        const size_t blocks = matrix.size() / (filaments * filaments);
+        std::vector<double> per_head(blocks * heads * heads);
+        for (size_t b = 0; b < blocks; ++b)
+            for (size_t i = 0; i < heads; ++i)
+                for (size_t j = 0; j < heads; ++j)
+                    per_head[(b * heads + i) * heads + j] = matrix[(b * filaments + toolhead_filament(toolhead_filaments, i)) * filaments + toolhead_filament(toolhead_filaments, j)];
+        matrix = std::move(per_head);
+    }
     // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
     static const std::set<std::string_view> banned_keys( {
         // filament_extruder_compatibility is a device-side (blacklist) compatibility hint read from the

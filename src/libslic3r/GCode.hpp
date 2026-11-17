@@ -324,7 +324,8 @@ public:
     std::string set_object_info(Print* print);
 
     // append full config to the given string
-    static void append_full_config(const Print& print, std::string& str);
+    // toolhead_filaments: GCode::m_toolhead_filaments; per-filament lists then describe toolheads.
+    static void append_full_config(const Print& print, std::string& str, const std::vector<int>& toolhead_filaments = {});
 
     // Per-filament config-slot resolvers for the current layer (m_cur_layer_idx): the filament
     // resolver keys filament-indexed arrays, the nozzle resolver keys (extruder x volume-type)
@@ -338,6 +339,11 @@ public:
     // change_filament_gcode templates (e.g. Snapmaker U1) use [next_extruder] as the T<n> and as the
     // index into per-filament arrays; on shared toolheads point both at the toolheads.
     void remap_change_filament_placeholders(DynamicConfig &config, int old_filament_id, int new_filament_id);
+    // Per toolhead, the filament it prints first, -1 when unused; empty unless toolheads are shared.
+    std::vector<int> m_toolhead_filaments;
+    // The filament describing toolhead h in the printer-facing lists: its first, or its own when unused.
+    static int toolhead_filament(const std::vector<int> &toolhead_filaments, size_t h)
+    { return toolhead_filaments[h] >= 0 ? toolhead_filaments[h] : int(h); }
     // The filament resolver for a given layer, for the export pipeline stages after the generator,
     // which run behind the current layer and concurrently with the generator.
     size_t get_filament_config_index(int filament_id, size_t layer_id) const;
