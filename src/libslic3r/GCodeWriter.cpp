@@ -269,6 +269,7 @@ void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
     m_curr_extruder_id = -1;
     m_cached_extruder_idx = 0;
     std::fill(m_curr_filament_extruder.begin(), m_curr_filament_extruder.end(), nullptr);
+    m_toolhead_start_filaments.clear();
     m_filament_extruders.reserve(extruder_ids.size());
     for (unsigned int extruder_id : extruder_ids)
         m_filament_extruders.emplace_back(Extruder(extruder_id, &this->config, config.single_extruder_multi_material.value));
@@ -840,8 +841,10 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
         m_curr_filament_extruder[m_curr_extruder_id] = &*filament_extruder_iter;
         m_cached_extruder_idx = get_extruder_index(this->config, filament_id);
 
+        const int loaded_id = loaded != nullptr ? int(loaded->id()) :
+                              toolhead < m_toolhead_start_filaments.size() ? m_toolhead_start_filaments[toolhead] : -1;
         m_last_manual_load_gcode.clear();
-        if (loaded != nullptr && loaded->id() != filament_id) {
+        if (loaded_id >= 0 && loaded_id != int(filament_id)) {
             // The printer's own pause G-code (M601 on the Snapmaker U1); M600 only when it has none.
             // The printer may map the toolhead to another physical head, so the message names no toolhead:
             // the swap always happens on the toolhead just selected, which the printer has mapped.

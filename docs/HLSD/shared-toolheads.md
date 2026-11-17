@@ -33,8 +33,10 @@ G-code as before.
 
 Tool changes address the toolhead, not the filament: `T<toolhead>`. A change
 between two filaments of one toolhead is a manual swap. `GCodeWriter::toolchange`
-tracks which filament each toolhead holds. When the incoming filament differs
-from the loaded one it emits a message and the printer's pause G-code:
+tracks which filament each toolhead holds, starting from the filament the printer
+is told each toolhead holds (`m_toolhead_filaments`, below). When the incoming
+filament differs from the loaded one it emits a message and the printer's pause
+G-code:
 
 ```
 ; FILAMENT_TOOLHEAD 4
@@ -49,11 +51,20 @@ M109 S235 T0                            ; the new filament's temperature on its 
 logs an unknown command and carries on, and the message still shows on the
 display.
 
+The `M109` after the pause waits for the temperature the new filament prints at
+there: its first layer temperature on the first layer, also of the next object
+when printing by object, and when its other-layers temperature is 0.
+`GCode::manual_load_reheat` adds it on both the `set_extruder` and the type1
+wipe tower paths.
+
 The swap pauses whether the toolhead also changes or not. `change_filament_gcode`
 is skipped for a swap on the same toolhead. For a real head change its
-placeholders are remapped to toolheads: `next_extruder`, `previous_extruder`, and
-the toolhead slots of the temperature and `filament_type` arrays. Templates
-written for one filament per toolhead, such as the U1's, keep working. The start
+placeholders are remapped to toolheads: `next_extruder`, `previous_extruder`,
+`initial_extruder`, `initial_tool`, and the toolhead slots of the temperature and `filament_type` arrays. Templates
+written for one filament per toolhead, such as the U1's, keep working. On a head
+change that also needs a reload, the template runs before the pause, so any purge
+it does uses the filament still in the toolhead; the loaded filament is not
+purged after the print resumes. The start
 G-code sees `is_extruder_used`, the temperature arrays and `initial_tool` per
 toolhead too. `GCode::m_toolhead_filaments` records the filament each toolhead
 prints first, and those values come from it. When printing by object it covers
@@ -62,7 +73,9 @@ the filaments of every object, not only the first.
 Temperature commands name the toolhead as well. `GCodeWriter::set_temperature`
 maps a filament to its toolhead, the first-layer and second-layer temperature
 passes skip filaments their toolhead does not hold at that point, and the ooze
-prevention preheat is skipped for a swap on the same toolhead.
+prevention preheat is skipped for a swap on the same toolhead. Ooze prevention
+turns a toolhead off only after the last use of every filament on it, and the
+tower interface temperature pass looks for the toolhead in the `M109` it strips.
 
 The `FILAMENT_TOOLHEAD` tag carries the filament id for `GCodeProcessor`, which
 selects that filament and ignores the `T` that follows. The preview keeps one

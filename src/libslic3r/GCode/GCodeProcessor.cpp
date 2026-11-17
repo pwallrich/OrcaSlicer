@@ -4632,8 +4632,8 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (boost::starts_with(comment, Filament_Toolhead_Tag)) {
             const std::string id = std::string(comment.substr(Filament_Toolhead_Tag.length()));
             unsigned int      filament_id = 0;
-            std::from_chars(id.data(), id.data() + id.size(), filament_id);
-            m_filament_toolhead_tags = filament_id < m_result.filaments_count;
+            const auto [end, ec] = std::from_chars(id.data(), id.data() + id.size(), filament_id);
+            m_filament_toolhead_tags = ec == std::errc() && end == id.data() + id.size() && filament_id < m_result.filaments_count;
             if (m_filament_toolhead_tags)
                 process_T(std::string_view("T" + id));
             return;

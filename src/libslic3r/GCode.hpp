@@ -339,6 +339,9 @@ public:
     // change_filament_gcode templates (e.g. Snapmaker U1) use [next_extruder] as the T<n> and as the
     // index into per-filament arrays; on shared toolheads point both at the toolheads.
     void remap_change_filament_placeholders(DynamicConfig &config, int old_filament_id, int new_filament_id);
+    // After the tool change just made: when it needed a manual load, wait for the loaded filament's
+    // temperature (its first layer temperature when `temperature` <= 0).
+    std::string manual_load_reheat(unsigned int filament_id, int temperature) const;
     // Per toolhead, the filament it prints first, -1 when unused; empty unless toolheads are shared.
     std::vector<int> m_toolhead_filaments;
     // The filament describing toolhead h in the printer-facing lists: its first, or its own when unused.

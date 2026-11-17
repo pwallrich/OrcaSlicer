@@ -2779,3 +2779,64 @@ TEST_CASE("Re-importing shared-toolhead G-code keeps extrusion on the toolheads"
     for (const auto &[id, volume] : volumes)
         CHECK(id < 2); // the file's config block describes two toolheads
 }
+
+// The wait after a hand swap targets the temperature the new filament prints at, also when its
+// "other layers" temperature is 0 (use the first layer's), on the type1 wipe tower and on the
+// first layer of the next object printed by object.
+TEST_CASE("A hand swap waits for the loaded filament's printing temperature", "[MultiFilament][Toolchanger]")
+{
+    auto waits_after_swap = [](const std::string &gcode, const std::string &m109) {
+        std::istringstream stream(gcode);
+        bool after_swap = false;
+        for (std::string line; std::getline(stream, line);) {
+            if (line.rfind("M601", 0) == 0)
+                after_swap = true;
+            else if (after_swap && line.rfind(m109, 0) == 0)
+                return true;
+        }
+        return false;
+    };
+    SECTION("other layers temperature 0") {
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({ { "nozzle_temperature", "200,210,0" } });
+        size_flush_to_nozzles(config);
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 3 } } });
+        CHECK_FALSE(has_line(gcode, "M109 S0"));
+        CHECK(waits_after_swap(gcode, "M109 S235 T0"));
+    }
+    SECTION("type1 wipe tower") {
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({
+            { "enable_prime_tower", 1 },
+            { "wipe_tower_type", "type1" },
+            { "wipe_tower_x", "60" },
+            { "wipe_tower_y", "60" },
+        });
+        size_flush_to_nozzles(config);
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 2 } }, { { "extruder", 3 } } });
+        CHECK(waits_after_swap(gcode, "M109 S235 T0"));
+    }
+    SECTION("next object printed by object") {
+        DynamicPrintConfig config = shared_toolhead_config();
+        config.set_deserialize_strict({ { "print_sequence", "by object" }, { "nozzle_temperature_initial_layer", "200,210,245" } });
+        size_flush_to_nozzles(config);
+        const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                              { { { "extruder", 1 } }, { { "extruder", 3 } } });
+        CHECK(waits_after_swap(gcode, "M109 S245 T0"));
+    }
+}
+
+TEST_CASE("A change_filament_gcode macro sees the toolhead the print started on", "[MultiFilament][Toolchanger]")
+{
+    DynamicPrintConfig config = shared_toolhead_config();
+    config.set_deserialize_strict({ { "change_filament_gcode", "INITIAL={initial_extruder} TOOL={initial_tool} NEXT={next_extruder}\n" },
+                                    { "print_sequence", "by object" } });
+    size_flush_to_nozzles(config);
+    // The print starts with filament 3, which is loaded into T0.
+    const std::string gcode = slice_with_object_overrides({ cube(10), cube(10) }, config,
+                                                          { { { "extruder", 3 } }, { { "extruder", 2 } } });
+    CHECK(has_line(gcode, "INITIAL=0 TOOL=0 NEXT="));
+    CHECK_FALSE(has_line(gcode, "INITIAL=2"));
+}

@@ -169,6 +169,9 @@ public:
     // The manual reload (message + pause) the last toolchange() emitted, empty when none. A
     // change_filament_gcode macro that selects the toolhead itself still needs it appended.
     const std::string& last_manual_load_gcode() const { return m_last_manual_load_gcode; }
+    // Per toolhead, the filament the printer is told it holds at the start (-1: none); a first use of
+    // the toolhead with another filament needs a manual load as well.
+    void set_toolhead_start_filaments(std::vector<int> filaments) { m_toolhead_start_filaments = std::move(filaments); }
     void set_is_bbl_machine(bool bval) {m_is_bbl_printers = bval;}
     const bool is_bbl_printers() const {return m_is_bbl_printers;}
     void set_is_first_layer(bool bval) { m_is_first_layer = bval; }
@@ -314,6 +317,7 @@ private:
     size_t          m_toolhead_count  = 1;
     std::string     m_manual_swap_gcode;
     std::string     m_last_manual_load_gcode;
+    std::vector<int> m_toolhead_start_filaments;
 
     enum class Acceleration {
         Travel,

@@ -491,10 +491,15 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             coordf_t current_z        = gcodegen.layer() ? gcodegen.layer()->print_z : gcodegen.writer().get_position().z();
             const auto& tool_ordering = gcodegen.m_print->tool_ordering();
             const auto& cfg           = gcodegen.config();
-            const int heater          = imex_physical_heater_for(cfg.is_imex.value, cfg.physical_extruder_map, int(extruder_id));
+            // Orca: filaments sharing a toolhead share its heater too.
+            const auto heater_of      = [&](unsigned int f) {
+                return gcodegen.writer().has_shared_toolheads() ? int(gcodegen.toolchange_tool_id(f)) :
+                                                                  imex_physical_heater_for(cfg.is_imex.value, cfg.physical_extruder_map, int(f));
+            };
+            const int heater          = heater_of(extruder_id);
             is_last_use               = tool_ordering.is_last_extrusion_layer(current_z, extruder_id);
             for (unsigned int f : tool_ordering.all_extruders())
-                if (is_last_use && imex_physical_heater_for(cfg.is_imex.value, cfg.physical_extruder_map, int(f)) == heater)
+                if (is_last_use && heater_of(f) == heater)
                     is_last_use = tool_ordering.is_last_extrusion_layer(current_z, f);
         }
 
@@ -1505,6 +1510,13 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         } else {
             // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
         }
+        // Orca: a filament loaded by hand prints at its own temperature (the writer's manual load
+        // state belongs to this change only when it made one).
+        if (!toolchange_command.empty() && new_filament_id >= 0) {
+            const size_t fi = gcodegen.get_filament_config_index(new_filament_id);
+            toolchange_gcode_str += gcodegen.manual_load_reheat(new_filament_id,
+                gcodegen.on_first_layer() || tcr.priming ? 0 : gcodegen.config().nozzle_temperature.get_at(fi));
+        }
 
         // The change G-code may move the carriage even when the incoming
         // filament uses the same physical nozzle (the common AMS case).
@@ -1844,8 +1856,11 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             // blocking M109 in place and silently defeat the tower interface temperature.
             // (The sibling scan further down reads WipeTower2 output, whose set_extruder_temp
             // emits no T at all, so it is deliberately left alone.)
-            const int heater_id = imex_physical_heater_for(
-                gcodegen.config().is_imex.value, gcodegen.config().physical_extruder_map, new_extruder_id);
+            // Orca: on shared toolheads the writer names the toolhead of the filament.
+            const int heater_id = gcodegen.writer().has_shared_toolheads() ?
+                                      int(gcodegen.toolchange_tool_id(unsigned(new_extruder_id))) :
+                                      imex_physical_heater_for(gcodegen.config().is_imex.value,
+                                                               gcodegen.config().physical_extruder_map, new_extruder_id);
             const std::string t_token = " T" + std::to_string(heater_id);
             std::string out;
             out.reserve(toolchange_gcode_str.size());
@@ -4285,6 +4300,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         else
             for (const LayerTools &lt : tool_ordering.layer_tools())
                 std::for_each(lt.extruders.begin(), lt.extruders.end(), note);
+        m_writer.set_toolhead_start_filaments(m_toolhead_filaments);
     }
 
     // Orca: Don't output Header block if BTT thumbnail is identified in the list
@@ -5188,6 +5204,16 @@ bool GCode::holds_toolhead(unsigned int filament_id) const
     return int(filament_id) == (loaded != nullptr ? int(loaded->id()) : toolhead_filament(m_toolhead_filaments, head));
 }
 
+std::string GCode::manual_load_reheat(unsigned int filament_id, int temperature) const
+{
+    // The toolhead was still holding the previous filament's temperature: wait once the print resumes.
+    if (m_writer.last_manual_load_gcode().empty())
+        return {};
+    if (temperature <= 0) // nozzle_temperature == 0 means "use the first layer temperature"
+        temperature = m_config.nozzle_temperature_initial_layer.get_at(get_filament_config_index(int(filament_id)));
+    return m_writer.set_temperature(unsigned(temperature), true, int(filament_id));
+}
+
 bool GCode::is_manual_toolhead_swap(int old_filament_id, int new_filament_id) const
 {
     return old_filament_id >= 0 && new_filament_id >= 0 && old_filament_id != new_filament_id && m_writer.has_shared_toolheads() &&
@@ -5202,6 +5228,13 @@ void GCode::remap_change_filament_placeholders(DynamicConfig &config, int old_fi
     const int old_head = old_filament_id >= 0 ? int(toolchange_tool_id(old_filament_id)) : -1;
     config.set_key_value("previous_extruder", new ConfigOptionInt(old_head));
     config.set_key_value("next_extruder", new ConfigOptionInt(new_head));
+    // Compared with next_extruder (e.g. to skip purging the tool the start G-code already primed).
+    if (const auto *initial = dynamic_cast<const ConfigOptionInt *>(this->placeholder_parser().config().option("initial_extruder"));
+        initial != nullptr && initial->value >= 0) {
+        const int initial_head = int(toolchange_tool_id(unsigned(initial->value)));
+        config.set_key_value("initial_extruder", new ConfigOptionInt(initial_head));
+        config.set_key_value("initial_tool", new ConfigOptionInt(initial_head));
+    }
     // Per-filament arrays read as array[next_extruder] / array[previous_extruder]: give each toolhead
     // slot the values of the filament changed from / to. Values already overridden for this change
     // (e.g. an interface temperature) are taken from `config`.
@@ -11706,14 +11739,9 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     } else {
         // user provided his own toolchange gcode, no need to do anything
     }
-    // Orca: a filament loaded by hand into a shared toolhead prints at its own temperature. Wait for it
-    // once the print resumes; the toolhead was still holding the previous filament's temperature.
-    if (!m_writer.last_manual_load_gcode().empty()) {
-        const size_t fi = get_filament_config_index(new_filament_id);
-        gcode += m_writer.set_temperature(m_layer_index <= 0 ? m_config.nozzle_temperature_initial_layer.get_at(fi) :
-                                                               m_config.nozzle_temperature.get_at(fi),
-                                          true, int(new_filament_id));
-    }
+    // Orca: a filament loaded by hand prints at its own temperature. The next object printed by
+    // object starts on its first layer.
+    gcode += manual_load_reheat(new_filament_id, by_object ? 0 : new_filament_temp);
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)
     if (m_config.single_extruder_multi_material && !m_config.enable_prime_tower) {
